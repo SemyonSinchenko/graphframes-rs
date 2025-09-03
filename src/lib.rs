@@ -1,3 +1,4 @@
+mod connected_components;
 mod pagerank;
 mod pregel;
 mod shortest_paths;
@@ -42,6 +43,50 @@ impl GraphFrame {
         )?;
         Ok(df.select(vec![col(EDGE_SRC).alias(VERTEX_ID), col("out_degree")])?)
     }
+
+    /// Creates a symmetric graph by duplicating all edges in the reverse direction.
+    /// For each edge (a,b) in the graph, adds the edge (b,a) if it doesn't exist.
+    /// Any additional edge attributes are preserved in the reversed edges.
+    ///
+    /// # Returns
+    /// A new `GraphFrame` containing the original vertices and symmetrized edges.
+    ///
+    /// # Errors
+    /// Return a DataFusion error if the edge transformation operations fail.
+    pub fn symmetrize(&self) -> Result<GraphFrame> {
+        let vertices = self.vertices.clone();
+        let edges_cols = self
+            .edges
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect::<Vec<_>>();
+        let new_edges_cols = edges_cols
+            .clone()
+            .iter()
+            .map(|c| {
+                if c == EDGE_SRC {
+                    col(EDGE_SRC).alias(EDGE_DST)
+                } else if c == EDGE_DST {
+                    col(EDGE_DST).alias(EDGE_SRC)
+                } else {
+                    col(c)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        // We need to:
+        // - swap dst and src
+        // - preserve the order of columns for union
+        let edges = self.edges.clone().union(
+            self.edges
+                .clone()
+                .select(new_edges_cols)?
+                .select_columns(&edges_cols.iter().map(|c| c.as_str()).collect::<Vec<_>>())?,
+        )?;
+        Ok(GraphFrame { vertices, edges })
+    }
 }
 
 #[cfg(test)]
@@ -52,7 +97,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    fn create_test_graph() -> Result<GraphFrame> {
+    pub fn create_test_graph() -> Result<GraphFrame> {
         let ctx = SessionContext::new();
 
         let vertices_data = RecordBatch::try_new(
@@ -224,6 +269,65 @@ mod tests {
         assert_eq!(degree_map.get(&8), Some(&2));
         assert_eq!(degree_map.get(&9), Some(&1));
         assert_eq!(degree_map.get(&10), Some(&1));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_symmetrize() -> Result<()> {
+        let graph = create_test_graph()?;
+        let sym_graph = graph.symmetrize()?;
+
+        // Original vertices should be preserved
+        assert_eq!(graph.num_nodes().await?, sym_graph.num_nodes().await?);
+
+        // Number of edges should double
+        let orig_edges = graph.num_edges().await?;
+        let sym_edges = sym_graph.num_edges().await?;
+        assert_eq!(sym_edges, orig_edges * 2);
+
+        // In and out degrees should be equal for all vertices in symmetric graph
+        let in_degrees = sym_graph.in_degrees().await?.collect().await?;
+        let out_degrees = sym_graph.out_degrees().await?.collect().await?;
+
+        let mut in_degree_map = HashMap::new();
+        let mut out_degree_map = HashMap::new();
+
+        for batch in in_degrees.iter() {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            let degrees = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            for i in 0..ids.len() {
+                in_degree_map.insert(ids.value(i), degrees.value(i));
+            }
+        }
+
+        for batch in out_degrees.iter() {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            let degrees = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            for i in 0..ids.len() {
+                out_degree_map.insert(ids.value(i), degrees.value(i));
+            }
+        }
+
+        for id in 1..=10 {
+            assert_eq!(in_degree_map.get(&id), out_degree_map.get(&id));
+        }
 
         Ok(())
     }
