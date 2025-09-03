@@ -24,7 +24,7 @@ and Pregel API.
 | Shortest Paths                  | ✓           | ✓              |
 | PageRank                        | ✓           | ✓              |
 | Parallel Personalized PageRank  | ✓           | Planned        |
-| Connected Components            | ✓           | Planned        |
+| Connected Components            | ✓           | In progress    |
 | Strongly Connected Components   | ✓           | Planned        |
 | Triangle Count                  | ✓           | Planned        |
 | Label Propagation               | ✓           | Planned        |
