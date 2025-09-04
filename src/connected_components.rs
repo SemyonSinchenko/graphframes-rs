@@ -204,7 +204,7 @@ impl GraphFrame {
     /// let components = graph.connected_components()
     ///                        .run(); // Example of further usage with the builder.
     /// ```
-    pub fn connected_components(&self) -> ConnectedComponentsBuilder {
+    pub fn connected_components(&self) -> ConnectedComponentsBuilder<'_> {
         ConnectedComponentsBuilder::new(self)
     }
 }

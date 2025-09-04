@@ -102,7 +102,7 @@ impl<'a> PageRankBuilder<'a> {
 
 impl GraphFrame {
     /// Create a new PageRank algorithm builder
-    pub fn pagerank(&self) -> PageRankBuilder {
+    pub fn pagerank(&self) -> PageRankBuilder<'_> {
         PageRankBuilder::new(self)
     }
 }
