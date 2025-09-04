@@ -6,33 +6,38 @@ use crate::{EDGE_DST, EDGE_SRC, GraphFrame, VERTEX_ID};
 use datafusion::arrow::array::{Array, Decimal128Array};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::error::Result;
-use datafusion::functions_aggregate::expr_fn::{count, min, sum};
+use datafusion::functions_aggregate::expr_fn::{min, sum};
 use datafusion::prelude::*;
 
 pub const COMPONENT_COL: &str = "component";
 const MIN_NBR: &str = "min_nbr";
-const CNT_OF_NBR: &str = "cnt_of_nbr";
 
-fn min_neighbours(edges: &DataFrame, including_self: bool) -> Result<DataFrame> {
-    let res = edges
-        .clone()
-        .union(edges.clone().select(vec![
+/// Computes the minimum neighbor for each vertex in a graph edge list.
+///
+/// This function takes a DataFrame representing the edges of a graph. It computes the minimum destination vertex
+/// (neighbor) for each source vertex in the graph. Optionally, the graph can be symmetrized before
+/// computing the minimum neighbors. Symmetrization ensures that for every directed edge `(u, v)`,
+/// the reverse edge `(v, u)` is also included in the edge list.
+fn min_neighbours(edges: &DataFrame, symmetrize: bool) -> Result<DataFrame> {
+    // symmetrize edges if needed
+    let ee = if symmetrize {
+        edges.clone().union(edges.clone().select(vec![
             col(EDGE_DST).alias(EDGE_SRC),
             col(EDGE_SRC).alias(EDGE_DST),
         ])?)?
-        .aggregate(
-            vec![col(EDGE_SRC).alias(VERTEX_ID)],
-            vec![min(col(EDGE_DST)).alias(MIN_NBR), count(col(EDGE_DST))],
-        );
-
-    if including_self {
-        res?.with_column(
-            MIN_NBR,
-            when(col(VERTEX_ID).lt(col(MIN_NBR)), col(VERTEX_ID)).otherwise(col(MIN_NBR))?,
-        )
     } else {
-        res
-    }
+        edges.clone()
+    };
+    ee.aggregate(
+        vec![col(EDGE_SRC).alias(VERTEX_ID)],
+        vec![min(col(EDGE_DST)).alias(MIN_NBR)],
+    )?
+    .select(vec![
+        col(VERTEX_ID),
+        when(col(VERTEX_ID).lt(col(MIN_NBR)), col(VERTEX_ID))
+            .otherwise(col(MIN_NBR))?
+            .alias(MIN_NBR),
+    ])
 }
 
 /// Calculate the sum of all the minimum neighbor values in a DataFrame.
@@ -68,20 +73,11 @@ pub struct ConnectedComponentsOutput {
 #[derive(Debug)]
 pub struct ConnectedComponentsBuilder<'a> {
     graph_frame: &'a GraphFrame,
-    checkpoint_interval: i32,
 }
 
 impl<'a> ConnectedComponentsBuilder<'a> {
     pub fn new(graph_frame: &'a GraphFrame) -> Self {
-        Self {
-            graph_frame,
-            checkpoint_interval: 1,
-        }
-    }
-
-    pub fn checkpoint_interval(mut self, checkpoint_interval: i32) -> Self {
-        self.checkpoint_interval = checkpoint_interval;
-        self
+        Self { graph_frame }
     }
 
     pub async fn run(self) -> Result<ConnectedComponentsOutput> {
@@ -103,19 +99,14 @@ impl<'a> ConnectedComponentsBuilder<'a> {
         ])?;
         let deduped_edges = ordered_by_direction_edges.distinct()?;
 
-        let cc_graph = GraphFrame {
-            vertices: vertices.clone(),
-            edges: deduped_edges.clone(),
-        };
-
         let mut iteration = 0usize;
         let mut metrics = Vec::<i128>::new();
         let mut converged = false;
 
-        let mut minimal_neighbours_1 = min_neighbours(&cc_graph.edges.clone(), true)?;
+        let mut minimal_neighbours_1 = min_neighbours(&deduped_edges.clone(), true)?;
         let mut last_iter_nbr_sum = min_nbr_sum(&minimal_neighbours_1.clone()).await?;
         metrics.push(last_iter_nbr_sum);
-        let mut current_edges = deduped_edges.clone();
+        let mut current_edges = deduped_edges.clone().cache().await?;
 
         while !converged {
             iteration += 1;
@@ -125,7 +116,7 @@ impl<'a> ConnectedComponentsBuilder<'a> {
                 .join_on(
                     minimal_neighbours_1.clone(),
                     JoinType::Inner,
-                    vec![col(VERTEX_ID).eq(col(EDGE_SRC))],
+                    vec![col(EDGE_SRC).eq(col(VERTEX_ID))],
                 )?
                 .select(vec![
                     col(EDGE_DST).alias(EDGE_SRC),
@@ -147,8 +138,10 @@ impl<'a> ConnectedComponentsBuilder<'a> {
                 .join_on(
                     minimal_neighbours_2.clone(),
                     JoinType::Inner,
-                    vec![col(VERTEX_ID).eq(col(EDGE_SRC))],
+                    vec![col(EDGE_SRC).eq(col(VERTEX_ID))],
                 )?
+                .select(vec![col(MIN_NBR).alias(EDGE_SRC), col(EDGE_DST)])?
+                .filter(col(EDGE_SRC).not_eq(col(EDGE_DST)))?
                 .union(minimal_neighbours_2.select(vec![
                     col(MIN_NBR).alias(EDGE_SRC),
                     col(VERTEX_ID).alias(EDGE_DST),
@@ -170,14 +163,49 @@ impl<'a> ConnectedComponentsBuilder<'a> {
         }
 
         Ok(ConnectedComponentsOutput {
-            data: vertices.join_on(
-                current_edges,
-                JoinType::Inner,
-                vec![col(VERTEX_ID).eq(col(EDGE_DST))],
-            )?,
+            data: vertices
+                .join_on(
+                    current_edges,
+                    JoinType::Left,
+                    vec![col(VERTEX_ID).eq(col(EDGE_DST))],
+                )?
+                .select(vec![
+                    col(VERTEX_ID),
+                    when(col(EDGE_SRC).is_null(), col(VERTEX_ID))
+                        .otherwise(col(EDGE_SRC))?
+                        .alias(COMPONENT_COL),
+                ])?,
             num_iterations: iteration,
             min_nbr_sum: metrics,
         })
+    }
+}
+
+impl GraphFrame {
+    /// Constructs a new `ConnectedComponentsBuilder` for the current graph.
+    ///
+    /// This method is used to initialize the process of finding weakly connected components
+    /// within the graph. It creates a `ConnectedComponentsBuilder` instance
+    /// associated with the current graph, allowing further configuration or direct
+    /// computation of connected components.
+    ///
+    /// An implementation is based on the "large star - small star" algorithm:
+    /// Kiveris, Raimondas, et al. "Connected components in mapreduce and beyond."
+    /// Proceedings of the ACM Symposium on Cloud Computing. 2014.
+    /// https://dl.acm.org/doi/10.1145/2670979.2670997
+    ///
+    /// ### Returns
+    /// * `ConnectedComponentsBuilder`: A builder object for configuring or
+    ///   computing connected components.
+    ///
+    /// ### Example
+    /// ```
+    /// let graph = Graph::new();
+    /// let components = graph.connected_components()
+    ///                        .run(); // Example of further usage with the builder.
+    /// ```
+    pub fn connected_components(&self) -> ConnectedComponentsBuilder {
+        ConnectedComponentsBuilder::new(self)
     }
 }
 
@@ -185,13 +213,15 @@ impl<'a> ConnectedComponentsBuilder<'a> {
 mod tests {
     use super::*;
     use crate::tests::create_test_graph;
+    use crate::util::create_ldbc_test_graph;
     use datafusion::arrow::array::Int64Array;
+    use datafusion::arrow::datatypes::{Field, Schema};
 
     #[tokio::test]
     async fn test_min_nbr() -> Result<()> {
         let graph = create_test_graph()?;
         let min_nbrs = min_neighbours(&graph.edges.clone(), true)?;
-        assert_eq!(min_nbrs.schema().fields().len(), 3);
+        assert_eq!(min_nbrs.schema().fields().len(), 2);
         assert_eq!(min_nbrs.clone().count().await?, 10);
         let collected = min_nbrs.collect().await?;
         let min_neighbours = collected
@@ -226,6 +256,157 @@ mod tests {
         first.collect().await?;
         let sum = min_nbr_sum(&min_nbrs).await?;
         assert_eq!(sum, 10);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_zero_vertices() -> Result<()> {
+        let vertices = dataframe!(VERTEX_ID => Vec::<i64>::new())?;
+        let edges = dataframe!(EDGE_SRC => Vec::<i64>::new(), EDGE_DST => Vec::<i64>::new())?;
+        let graph = GraphFrame { vertices, edges };
+        let cc = ConnectedComponentsBuilder::new(&graph).run().await?;
+        assert_eq!(cc.data.schema().fields().len(), 2);
+        assert_eq!(cc.data.count().await?, 0);
+        assert_eq!(cc.num_iterations, 1);
+        assert_eq!(cc.min_nbr_sum.len(), 1);
+        assert_eq!(cc.min_nbr_sum[0], 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_single_vertex() -> Result<()> {
+        let vertices = dataframe!(VERTEX_ID => vec![1i64])?;
+        let edges = dataframe!(EDGE_SRC => Vec::<i64>::new(), EDGE_DST => Vec::<i64>::new())?;
+        let graph = GraphFrame { vertices, edges };
+        let cc = ConnectedComponentsBuilder::new(&graph).run().await?;
+        assert_eq!(cc.data.schema().fields().len(), 2);
+        assert_eq!(cc.data.clone().count().await?, 1);
+        assert_eq!(cc.num_iterations, 1);
+        assert_eq!(cc.min_nbr_sum.len(), 1);
+        assert_eq!(cc.min_nbr_sum[0], 0);
+        assert_eq!(
+            cc.data
+                .collect()
+                .await?
+                .first()
+                .unwrap()
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            1i64
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_two_vertices() -> Result<()> {
+        let vertices = dataframe!(VERTEX_ID => vec![1i64, 2i64])?;
+        let edges = dataframe!(EDGE_SRC => vec![1i64], EDGE_DST => vec![2i64])?;
+        let graph = GraphFrame { vertices, edges };
+        let cc = ConnectedComponentsBuilder::new(&graph).run().await?;
+        assert_eq!(cc.data.schema().fields().len(), 2);
+        assert_eq!(cc.data.clone().count().await?, 2);
+        assert_eq!(cc.num_iterations, 1);
+        assert_eq!(cc.min_nbr_sum.len(), 1);
+        assert_eq!(cc.min_nbr_sum[0], 2);
+        let batches = cc.data.sort_by(vec![col(VERTEX_ID)])?.collect().await?;
+        let result = batches.iter().fold(Vec::<i64>::new(), |mut acc, batch| {
+            acc.append(
+                &mut batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec(),
+            );
+            acc
+        });
+        assert_eq!(result[0], 1i64);
+        assert_eq!(result[1], 1i64);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_disconnected_vertices() -> Result<()> {
+        let vertices = dataframe!(VERTEX_ID => vec![1i64, 2i64])?;
+        let edges = dataframe!(EDGE_SRC => Vec::<i64>::new(), EDGE_DST => Vec::<i64>::new())?;
+        let graph = GraphFrame { vertices, edges };
+        let cc = ConnectedComponentsBuilder::new(&graph).run().await?;
+        assert_eq!(cc.data.schema().fields().len(), 2);
+        assert_eq!(cc.data.clone().count().await?, 2);
+        assert_eq!(cc.num_iterations, 1);
+        assert_eq!(cc.min_nbr_sum.len(), 1);
+        assert_eq!(cc.min_nbr_sum[0], 0);
+        let batches = cc.data.sort_by(vec![col(VERTEX_ID)])?.collect().await?;
+        let result = batches.iter().fold(Vec::<i64>::new(), |mut acc, batch| {
+            acc.append(
+                &mut batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec(),
+            );
+            acc
+        });
+        assert_eq!(result[0], 1i64);
+        assert_eq!(result[1], 2i64);
+
+        Ok(())
+    }
+
+    async fn get_ldbc_wcc_results(dataset: &str) -> Result<DataFrame> {
+        let ctx = SessionContext::new();
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let expected_wcc_schema = Schema::new(vec![
+            Field::new("vertex_id", DataType::Int64, false),
+            Field::new("expected_component", DataType::Int64, false),
+        ]);
+        let expected_wcc_path = format!(
+            "{}/testing/data/ldbc/{}/{}-WCC.csv",
+            manifest_dir, dataset, dataset
+        );
+        let expected_sp = ctx
+            .read_csv(
+                &expected_wcc_path,
+                CsvReadOptions::new()
+                    .delimiter(b' ')
+                    .has_header(false)
+                    .schema(&expected_wcc_schema),
+            )
+            .await?;
+        Ok(expected_sp)
+    }
+
+    #[tokio::test]
+    async fn test_ldbc() -> Result<()> {
+        let expected_components = get_ldbc_wcc_results("test-wcc-directed").await?;
+        let graph = create_ldbc_test_graph("test-wcc-directed", false, false).await?;
+
+        let results = graph.connected_components().run().await?.data;
+        let diff = results
+            .clone()
+            .join(
+                expected_components,
+                JoinType::Left,
+                &[VERTEX_ID],
+                &["vertex_id"],
+                None,
+            )?
+            .select(vec![
+                col(VERTEX_ID),
+                col(COMPONENT_COL),
+                col("expected_component"),
+            ])?
+            .filter(col(COMPONENT_COL).not_eq(col("expected_component")))?;
+
+        assert_eq!(diff.count().await?, 0);
+
         Ok(())
     }
 }
