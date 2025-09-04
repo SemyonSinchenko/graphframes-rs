@@ -11,3 +11,16 @@ exclude = [
 [dependencies]
 datafusion = "48.0.1"
 tokio = {version = "1"}
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+tokio = { version = "1", features = ["full"] }
+
+[[bench]]
+name = "pagerank_benchmark"
+harness = false # To disable Rust's default benchmarking and use the Criterion one
+
+# Adding more benchmarks
+# [[bench]]
+# name = "shortestdistance_benchmark"
+# harness = false

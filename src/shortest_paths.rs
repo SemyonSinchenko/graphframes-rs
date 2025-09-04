@@ -324,7 +324,7 @@ impl GraphFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::create_ldbc_test_graph;
+    use crate::util::create_ldbc_test_graph;
     use datafusion::arrow::array::{Int64Array, RecordBatch};
     use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use datafusion::prelude::SessionContext;
@@ -500,7 +500,7 @@ mod tests {
     #[tokio::test]
     async fn test_ldbc() -> Result<()> {
         let expected_distances = get_ldbc_bfs_results("test-bfs-directed").await?;
-        let graph = create_ldbc_test_graph("test-bfs-directed").await?;
+        let graph = create_ldbc_test_graph("test-bfs-directed", false, false).await?;
 
         let results = graph
             .shortest_paths(vec![1])

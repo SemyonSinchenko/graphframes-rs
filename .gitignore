@@ -6,4 +6,5 @@
 .cargo/
 debug/
 release/
+/benches/data/
 

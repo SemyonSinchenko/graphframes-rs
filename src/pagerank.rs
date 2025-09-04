@@ -1,12 +1,15 @@
-use crate::GraphFrame;
 use crate::pregel::{MessageDirection, PREGEL_MSG, PregelBuilder, pregel_src};
+use crate::{GraphFrame, VERTEX_ID};
 use datafusion::error::Result;
 use datafusion::functions_aggregate::sum::sum;
 use datafusion::prelude::*;
 
+/// Column name for pagerank in the Page Rank algorithm
+pub const PAGERANK: &str = "pagerank";
+
 /// A builder for the PageRank algorithm.
 ///
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PageRankBuilder<'a> {
     graph: &'a GraphFrame,
     max_iter: usize,
@@ -65,13 +68,13 @@ impl<'a> PageRankBuilder<'a> {
             .max_iterations(self.max_iter)
             .checkpoint_interval(self.checkpoint_interval)
             .add_vertex_column(
-                "pagerank",
+                PAGERANK,
                 lit(reset_prob_per_vertices), // All vertices start with a rank of 1/N
                 lit(reset_prob_per_vertices) + lit(alpha) * col(PREGEL_MSG), // PageRank calculation
             )
             .add_vertex_column("out_degree", col("out_degree"), col("out_degree")) // out_degrees are static
             .add_message(
-                pregel_src("pagerank") / pregel_src("out_degree"),
+                pregel_src(PAGERANK) / pregel_src("out_degree"),
                 MessageDirection::SrcToDst,
             )
             .with_aggregate_expr(sum(col(PREGEL_MSG)));
@@ -83,7 +86,7 @@ impl<'a> PageRankBuilder<'a> {
         // Calculating the pagerank aggregation
         let aggregated_rank = calculated_page_ranks
             .clone()
-            .aggregate(vec![], vec![sum(col("pagerank")).alias("pagerank_sum")])?
+            .aggregate(vec![], vec![sum(col(PAGERANK)).alias("pagerank_sum")])?
             .cache()
             .await?;
 
@@ -91,8 +94,8 @@ impl<'a> PageRankBuilder<'a> {
         let final_page_ranks =
             calculated_page_ranks.join(aggregated_rank, JoinType::Inner, &[], &[], None)?;
         Ok(final_page_ranks.select(vec![
-            col("id"),
-            (col("pagerank") / col("pagerank_sum")).alias("pagerank"),
+            col(VERTEX_ID),
+            (col(PAGERANK) / col("pagerank_sum")).alias(PAGERANK),
         ])?)
     }
 }
@@ -107,9 +110,8 @@ impl GraphFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::create_ldbc_test_graph;
+    use crate::util::create_ldbc_test_graph;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
-
     // Gets the expected pagerank results from the mentioned ldbc dataset
     async fn get_ldbc_pr_results(dataset: &str) -> Result<DataFrame> {
         let ctx = SessionContext::new();
@@ -137,13 +139,12 @@ mod tests {
     #[tokio::test]
     async fn test_pagerank_run() -> Result<()> {
         let test_dataset: &str = "test-pr-directed";
-        let graph = create_ldbc_test_graph(test_dataset).await?;
-
+        let graph = create_ldbc_test_graph(test_dataset, false, false).await?;
         let calculated_page_rank = graph
             .pagerank()
             .max_iter(14)
             .reset_prob(0.15)
-            .checkpoint_interval(2)
+            .checkpoint_interval(1)
             .run()
             .await?;
         let ldbc_page_rank = get_ldbc_pr_results(test_dataset).await?;
@@ -152,11 +153,11 @@ mod tests {
             .join(
                 ldbc_page_rank,
                 JoinType::Left,
-                &["id"],
+                &[VERTEX_ID],
                 &["vertex_id"],
                 None,
             )?
-            .with_column("difference", abs(col("pagerank") - col("expected_pr")))?
+            .with_column("difference", abs(col(PAGERANK) - col("expected_pr")))?
             .filter(col("difference").gt(lit(0.0015)))?;
 
         // comparison_df.clone().show().await?;
