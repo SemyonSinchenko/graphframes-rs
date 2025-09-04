@@ -14,8 +14,8 @@ pub const EDGE_DST: &str = "dst";
 
 #[derive(Debug, Clone)]
 pub struct GraphFrame {
-    vertices: DataFrame,
-    edges: DataFrame,
+    pub vertices: DataFrame,
+    pub edges: DataFrame,
 }
 
 impl GraphFrame {

@@ -200,9 +200,12 @@ impl GraphFrame {
     ///
     /// ### Example
     /// ```
-    /// let graph = Graph::new();
-    /// let components = graph.connected_components()
-    ///                        .run(); // Example of further usage with the builder.
+    /// use datafusion::dataframe;
+    /// use graphframes_rs::{GraphFrame, VERTEX_ID, EDGE_SRC, EDGE_DST};
+    /// let vertices = dataframe!(VERTEX_ID => vec![1i64, 2i64, 3i64]).unwrap();
+    /// let edges = dataframe!(EDGE_SRC => vec![1i64, 2i64, 3i64], EDGE_DST => vec![3i64, 1i64, 2i64]).unwrap();
+    /// let graph = GraphFrame { vertices, edges };
+    /// let components = graph.connected_components().run();
     /// ```
     pub fn connected_components(&self) -> ConnectedComponentsBuilder<'_> {
         ConnectedComponentsBuilder::new(self)
