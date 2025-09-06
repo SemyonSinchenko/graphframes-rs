@@ -413,36 +413,19 @@ impl GraphFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::arrow::array::{Array, Int32Array, Int64Array, RecordBatch};
-    use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+    use datafusion::arrow::array::{Array, Int32Array, Int64Array};
     use datafusion::functions_aggregate::min_max::max;
     use datafusion::functions_aggregate::sum::sum;
-    use std::sync::Arc;
 
     fn create_graph(vertices: Vec<i64>, edges: Vec<Vec<i64>>) -> Result<GraphFrame> {
-        let ctx = SessionContext::new();
-
-        let vertices_data = RecordBatch::try_new(
-            SchemaRef::from(Schema::new(vec![Field::new("id", DataType::Int64, false)])),
-            vec![Arc::new(Int64Array::from(vertices))],
+        let vertices_df = dataframe!(
+            VERTEX_ID => Vec::<i64>::from(vertices),
         )?;
-        let vertices_df = ctx.read_batch(vertices_data)?;
-
-        let edges_data = RecordBatch::try_new(
-            SchemaRef::from(Schema::new(vec![
-                Field::new("src", DataType::Int64, false),
-                Field::new("dst", DataType::Int64, false),
-            ])),
-            vec![
-                Arc::new(Int64Array::from(
-                    edges.iter().map(|e| e[0]).collect::<Vec<i64>>(),
-                )),
-                Arc::new(Int64Array::from(
-                    edges.iter().map(|e| e[1]).collect::<Vec<i64>>(),
-                )),
-            ],
-        )?;
-        let edges_df = ctx.read_batch(edges_data)?;
+        let edges_df = dataframe!(EDGE_SRC => Vec::<i64>::from(
+            edges.iter().map(|e| e[0]).collect::<Vec<i64>>()
+        ), EDGE_DST => Vec::<i64>::from(
+            edges.iter().map(|e| e[1]).collect::<Vec<i64>>()
+        ))?;
 
         Ok(GraphFrame {
             vertices: vertices_df,
