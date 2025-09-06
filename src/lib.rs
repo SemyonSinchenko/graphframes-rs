@@ -190,7 +190,7 @@ impl GraphFrame {
 mod tests {
     use super::*;
     use datafusion::arrow::array::{Int64Array, RecordBatch, StringArray};
-    use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+    use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
     use std::collections::HashMap;
     use std::sync::Arc;
 
