@@ -11,7 +11,7 @@ It provides a similar API to Apache Spark's GraphFrames.
 
 ## Project Status
 
-The project is in early development stage. Currently implemented features include basic graph operations, statistics,
+The project is in the early development stage. Currently implemented features include basic graph operations, statistics,
 and Pregel API.
 
 ## Features
@@ -24,7 +24,7 @@ and Pregel API.
 | Shortest Paths                  | ✓           | ✓              |
 | PageRank                        | ✓           | ✓              |
 | Parallel Personalized PageRank  | ✓           | Planned        |
-| Connected Components            | ✓           | In progress    |
+| Connected Components            | ✓           | ✓              |
 | Strongly Connected Components   | ✓           | Planned        |
 | Triangle Count                  | ✓           | Planned        |
 | Label Propagation               | ✓           | Planned        |

@@ -316,7 +316,7 @@ impl GraphFrame {
     ///
     /// # Returns
     /// a Builder object to configure and execute the shortest paths computation
-    pub fn shortest_paths(&self, landmarks: Vec<i64>) -> ShortestPathsBuilder {
+    pub fn shortest_paths(&self, landmarks: Vec<i64>) -> ShortestPathsBuilder<'_> {
         ShortestPathsBuilder::new(self, landmarks)
     }
 }
