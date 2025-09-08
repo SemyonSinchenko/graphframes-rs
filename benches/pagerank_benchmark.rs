@@ -1,4 +1,4 @@
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion};
 use graphframes_rs::util::create_ldbc_test_graph;
 use std::env;
 use tokio::runtime::Runtime;
@@ -12,14 +12,21 @@ fn benchmark_pagerank(c: &mut Criterion) {
         .parse()
         .expect("CHECKPOINT_INTERVAL is not a valid int");
 
+    let is_weighted = match env::var("WEIGHTED").expect("WEIGHTED environment variable not set") {
+        s if s == "true" => true,
+        _ => false,
+    };
+
     let mut group = c.benchmark_group("PageRank");
+    group.sample_size(10);
+    group.measurement_time(std::time::Duration::from_secs(200));
 
     // Create a Tokio runtime to execute the async graph loading function.
     let rt = Runtime::new().unwrap();
 
     // Load the graph data once before running the benchmark.
     let graph = rt
-        .block_on(create_ldbc_test_graph(&dataset_name, true, false))
+        .block_on(create_ldbc_test_graph(&dataset_name, true, is_weighted))
         .expect("Failed to create test graph");
 
     // Creating pagerank_builder here so to exclude the time of generation in each iteration

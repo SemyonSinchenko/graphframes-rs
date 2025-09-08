@@ -1,9 +1,9 @@
-# Running Benchmarks for Graphframe-rs
+# Running Benchmarks for graphframes-rs
 
-Benchmarking for Graphframe-rs are currently done on LDBC Graphalytics [datasets](https://ldbcouncil.org/benchmarks/graphalytics/datasets/).
+Benchmarking for graphframes-rs is currently done on LDBC Graphalytics [datasets](https://ldbcouncil.org/benchmarks/graphalytics/datasets/).
 Benchmarking runs and reports are executed/generated as html-reports using Rust Criterion crate.
 
-## How to run benchmarks ?
+## How to run benchmarks?
 
 `run_benchmarks.py` file is the main source for running the benchmarks.
 
@@ -24,9 +24,9 @@ CLI utility:
 
 ### Parameters for `run_benchmarks.py`
 
-- `--dataset`: [MANDATORY] LDBC dataset name on which user want to run the benchmark (for e.g. test-pr-directed, cit-Patents). Dataset name are exactly same as mentioned in LDBC website.
+- `--dataset`: LDBC dataset name on which user want to run the benchmark (for e.g., test-pr-directed, cit-Patents). Dataset name is exactly the same as mentioned in LDBC website. Default is wiki-Talk.
 - `--checkpoint_interval`: If user wants to define a specific number of checkpoints for Algorithms to run on. `default: 1`
-- `--name`: If a particular benchmark needs to run. Name should be same as the `[[bench]]` names present in `Cargo.toml`
+- `--name`: [MANDATORY] If a particular benchmark needs to run. Name should be same as the `[[bench]]` names present in `Cargo.toml`
 
 ```bash
 # Running all the benchmarks

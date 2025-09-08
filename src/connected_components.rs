@@ -63,14 +63,14 @@ async fn min_nbr_sum(min_neighbours: &DataFrame) -> Result<i128> {
         .map(|a| a.value(0))
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConnectedComponentsOutput {
     pub data: DataFrame,
     pub num_iterations: usize,
     pub min_nbr_sum: Vec<i128>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConnectedComponentsBuilder<'a> {
     graph_frame: &'a GraphFrame,
 }
