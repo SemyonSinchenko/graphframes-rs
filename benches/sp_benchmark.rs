@@ -29,9 +29,7 @@ fn benchmark_sp(c: &mut Criterion) {
         .checkpoint_interval(checkpoint_interval);
 
     group.bench_function(
-        String::from(
-            "sp-".to_owned() + &dataset_name + "-cp-" + &checkpoint_interval.to_string(),
-        ),
+        String::from("sp-".to_owned() + &dataset_name + "-cp-" + &checkpoint_interval.to_string()),
         |b| {
             // Use the `to_async` adapter to benchmark an async function.
             b.to_async(&rt).iter(|| async {
