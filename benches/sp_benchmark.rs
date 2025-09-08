@@ -3,10 +3,9 @@ use graphframes_rs::util::create_ldbc_test_graph;
 use std::env;
 use tokio::runtime::Runtime;
 
-fn benchmark_pagerank(c: &mut Criterion) {
+fn benchmark_sp(c: &mut Criterion) {
     let dataset_name =
         env::var("BENCHMARK_DATASET").expect("BENCHMARK_DATASET environment variable not set");
-
     let checkpoint_interval: usize = env::var("CHECKPOINT_INTERVAL")
         .expect("BENCHMARK_DATASET environment variable not set")
         .parse()
@@ -16,42 +15,27 @@ fn benchmark_pagerank(c: &mut Criterion) {
         s if s == "true" => true,
         _ => false,
     };
-
-    let mut group = c.benchmark_group("PageRank");
+    let mut group = c.benchmark_group("ShortestPath");
     group.sample_size(10);
     group.measurement_time(std::time::Duration::from_secs(200));
 
-    // Create a Tokio runtime to execute the async graph loading function.
     let rt = Runtime::new().unwrap();
-
-    // Load the graph data once before running the benchmark.
     let graph = rt
         .block_on(create_ldbc_test_graph(&dataset_name, true, is_weighted))
         .expect("Failed to create test graph");
 
-    // Creating pagerank_builder here so to exclude the time of generation in each iteration
-    let pagerank_builder = graph
-        .pagerank()
-        .max_iter(10)
-        .checkpoint_interval(checkpoint_interval)
-        .reset_prob(0.15);
+    let sp_builder = graph
+        .shortest_paths(vec![2i64]) // TODO: replace to read from props
+        .checkpoint_interval(checkpoint_interval);
 
-    // Define the benchmark.
-    // Criterion runs the code inside the closure many times to get a reliable measurement.
     group.bench_function(
         String::from(
-            "pagerank-".to_owned() + &dataset_name + "-cp-" + &checkpoint_interval.to_string(),
+            "sp-".to_owned() + &dataset_name + "-cp-" + &checkpoint_interval.to_string(),
         ),
         |b| {
             // Use the `to_async` adapter to benchmark an async function.
             b.to_async(&rt).iter(|| async {
-                let _ = pagerank_builder
-                    .clone()
-                    .run()
-                    .await
-                    .unwrap()
-                    .collect()
-                    .await;
+                let _ = sp_builder.clone().run().await.unwrap().collect().await;
             })
         },
     );
@@ -59,5 +43,5 @@ fn benchmark_pagerank(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, benchmark_pagerank);
+criterion_group!(benches, benchmark_sp);
 criterion_main!(benches);

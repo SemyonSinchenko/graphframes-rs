@@ -105,6 +105,7 @@ impl Accumulator for DistancesMap {
 ///
 /// This builder helps configure and execute a Pregel algorithm that computes the shortest paths
 /// from all vertices in the graph to a specified set of landmark vertices.
+#[derive(Debug, Clone)]
 pub struct ShortestPathsBuilder<'a> {
     /// Reference to the graph frame containing vertices and edges
     graph_frame: &'a GraphFrame,

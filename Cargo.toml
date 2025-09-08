@@ -23,3 +23,7 @@ harness = false # To disable Rust's default benchmarking and use the Criterion o
 [[bench]]
 name = "cc_benchmark"
 harness = false
+
+[[bench]]
+name = "sp_benchmark"
+harness = false
