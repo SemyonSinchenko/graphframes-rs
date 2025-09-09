@@ -79,6 +79,8 @@ pub async fn create_ldbc_test_graph(
                 .schema(&vertices_schema),
         )
         .await?;
+    println!("read {} vertices", vertices.clone().count().await?);
+    println!("read {} edges", edges.clone().count().await?);
     Ok(GraphFrame { vertices, edges })
 }
 

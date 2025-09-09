@@ -1,11 +1,12 @@
 import argparse
 import os
 import pathlib
-import requests
+import shutil
 import subprocess
 import sys
-import shutil
 import time
+
+import requests
 
 # The base URL for downloading Graphalytics datasets.
 BASE_URL = "https://datasets.ldbcouncil.org/graphalytics"
@@ -27,7 +28,7 @@ def prepare_dataset(dataset_name: str):
         print(f"Dataset '{dataset_name}' is ready.")
         return
 
-    # make dataset_dir if doesn't exist
+    # make dataset_dir if it doesn't exist
     os.mkdir(dataset_dir)
 
     # If the archive doesn't exist, download it.
@@ -97,7 +98,7 @@ def prepare_dataset(dataset_name: str):
         for dirpath, _, filenames in os.walk(dataset_dir):
             for filename in filenames:
                 if (not filename.endswith(".properties")) and (
-                    not filename.endswith(".tar.zst")
+                        not filename.endswith(".tar.zst")
                 ):
                     old_path = pathlib.Path(dirpath) / filename
                     new_path = old_path.with_name(f"{old_path.name}.csv")
@@ -118,7 +119,7 @@ def prepare_dataset(dataset_name: str):
         sys.exit(1)
 
 
-def run_benchmarks(dataset_name: str, checkpoint_interval: int, benchmark_name: str):
+def run_benchmarks(dataset_name: str, checkpoint_interval: int, benchmark_name: str, is_weighted: str = "false"):
     """
     Runs the Rust benchmarks using 'cargo bench', passing the dataset name
     as an environment variable.
@@ -128,7 +129,8 @@ def run_benchmarks(dataset_name: str, checkpoint_interval: int, benchmark_name: 
     # Set the dataset name in an environment variable for the benchmark process.
     env = os.environ.copy()
     env["BENCHMARK_DATASET"] = dataset_name
-    env["CHECKPOINT_INTERVAL"] = checkpoint_interval
+    env["CHECKPOINT_INTERVAL"] = str(checkpoint_interval)
+    env["WEIGHTED"] = is_weighted
 
     # Execute 'cargo bench' and stream its output.
     try:
@@ -181,7 +183,8 @@ def main():
     parser.add_argument(
         "--dataset",
         type=str,
-        required=True,
+        default="wiki-Talk",
+        required=False,
         help="The name of the Graphalytics dataset to download and use for benchmarking (e.g., 'test-pr-directed').",
     )
     parser.add_argument(
@@ -194,8 +197,15 @@ def main():
     parser.add_argument(
         "--name",
         type=str,
-        required=False,
+        required=True,
         help="Name of the benchmark that needs to run.",
+    )
+    parser.add_argument(
+        "--weighted",
+        type=str,
+        required=False,
+        default="false",
+        help="Whether the graph is weighted or not.",
     )
     args = parser.parse_args()
     dataset = args.dataset
@@ -206,7 +216,7 @@ def main():
     BENCH_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     prepare_dataset(dataset)
-    run_benchmarks(dataset, checkpoint_interval, benchmark_name)
+    run_benchmarks(dataset, checkpoint_interval, benchmark_name, is_weighted=args.weighted)
 
 
 if __name__ == "__main__":
