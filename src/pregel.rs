@@ -66,6 +66,8 @@ pub struct PregelBuilder {
     aggregate_expr: Option<Expr>,
     /// Checkpoint interval for intermediate results
     checkpoint_interval: usize,
+    /// Whethere to require the destination vertex state
+    use_dest_sate: bool,
 }
 
 #[derive(Debug)]
@@ -101,7 +103,14 @@ impl PregelBuilder {
             messages: Vec::new(),
             aggregate_expr: None,
             checkpoint_interval: 0,
+            use_dest_sate: true,
         }
+    }
+
+    /// Skip the destination state when building triplets
+    pub fn skip_dest_state(mut self) -> Self {
+        self.use_dest_sate = false;
+        self
     }
 
     /// Set the maximum number of iterations
@@ -201,26 +210,26 @@ impl PregelBuilder {
             match message.direction {
                 MessageDirection::SrcToDst => messages.push(named_struct(vec![
                     lit(VERTEX_ID),
-                    pregel_dst(VERTEX_ID),
+                    pregel_edge(EDGE_DST),
                     lit("msg"),
                     message.expr.clone(),
                 ])),
                 MessageDirection::DstToSrc => messages.push(named_struct(vec![
                     lit(VERTEX_ID),
-                    pregel_src(VERTEX_ID),
+                    pregel_edge(EDGE_SRC),
                     lit("msg"),
                     message.expr.clone(),
                 ])),
                 MessageDirection::Bidirectional => {
                     messages.push(named_struct(vec![
                         lit(VERTEX_ID),
-                        pregel_dst(VERTEX_ID),
+                        pregel_edge(EDGE_SRC),
                         lit("msg"),
                         message.expr.clone(),
                     ]));
                     messages.push(named_struct(vec![
                         lit(VERTEX_ID),
-                        pregel_src(VERTEX_ID),
+                        pregel_edge(EDGE_DST),
                         lit("msg"),
                         message.expr.clone(),
                     ]));
@@ -301,23 +310,31 @@ impl PregelBuilder {
                     edges_struct.clone(),
                     JoinType::Inner,
                     vec![pregel_src(VERTEX_ID).eq(pregel_edge(EDGE_SRC))],
-                )?
-                .join_on(
+                )?;
+
+            if self.use_dest_sate {
+                triplets = triplets.join_on(
                     vertices_struct
                         .clone()
                         .with_column_renamed("_vertex_struct", PREGEL_MSG_DST)?,
                     JoinType::Inner,
                     vec![pregel_dst(VERTEX_ID).eq(pregel_edge(EDGE_DST))],
                 )?;
+            }
 
             // If participation_column is present, skip triplets where both src and dst
             // are not participating in iteration.
             if self.participation_column.is_some() {
                 let participation_column = self.participation_column.as_ref().unwrap();
-                triplets = triplets.filter(
-                    pregel_src(&participation_column.name)
-                        .or(pregel_dst(&participation_column.name)),
-                )?;
+
+                if self.use_dest_sate {
+                    triplets = triplets.filter(
+                        pregel_src(&participation_column.name)
+                            .or(pregel_dst(&participation_column.name)),
+                    )?;
+                } else {
+                    triplets = triplets.filter(pregel_src(&participation_column.name))?;
+                }
             }
 
             // Unfortunately, "unnest" does not allow passing to it an array of expression;

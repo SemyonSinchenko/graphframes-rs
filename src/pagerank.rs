@@ -16,6 +16,7 @@ pub struct PageRankBuilder<'a> {
     reset_prob: f64,
     include_debug_columns: bool,
     checkpoint_interval: usize,
+    tol: f64,
 }
 
 impl<'a> PageRankBuilder<'a> {
@@ -26,6 +27,7 @@ impl<'a> PageRankBuilder<'a> {
             reset_prob: 0.15,
             include_debug_columns: false,
             checkpoint_interval: 2, // Revisit once default is finalized. temp for now.
+            tol: 0.01,
         }
     }
 
@@ -36,6 +38,11 @@ impl<'a> PageRankBuilder<'a> {
 
     pub fn reset_prob(mut self, prob: f64) -> Self {
         self.reset_prob = prob;
+        self
+    }
+
+    pub fn tol(mut self, tol: f64) -> Self {
+        self.tol = tol;
         self
     }
 
@@ -65,7 +72,6 @@ impl<'a> PageRankBuilder<'a> {
 
         // --- Step 2: Create Pregel builder ---
         let pregel_builder = PregelBuilder::new(graph_with_degrees)
-            .max_iterations(self.max_iter)
             .checkpoint_interval(self.checkpoint_interval)
             .add_vertex_column(
                 PAGERANK,
@@ -77,10 +83,26 @@ impl<'a> PageRankBuilder<'a> {
                 pregel_src(PAGERANK) / pregel_src("out_degree"),
                 MessageDirection::SrcToDst,
             )
-            .with_aggregate_expr(sum(col(PREGEL_MSG)));
+            .with_aggregate_expr(sum(col(PREGEL_MSG)))
+            .skip_dest_state();
 
         // --- Step 3: Run Pregel Engine ---
-        let result = pregel_builder.run(self.include_debug_columns).await?;
+        let result = if self.max_iter > 0 {
+            pregel_builder
+                .max_iterations(self.max_iter)
+                .run(self.include_debug_columns)
+                .await?
+        } else {
+            pregel_builder
+                .with_vertex_voting(
+                    "rank_changed",
+                    abs(col(PAGERANK)
+                        - (lit(reset_prob_per_vertices) + lit(alpha) * col(PREGEL_MSG)))
+                    .lt(lit(self.tol)),
+                )
+                .run(self.include_debug_columns)
+                .await?
+        };
         let calculated_page_ranks = result.data;
 
         // Calculating the pagerank aggregation
@@ -163,6 +185,46 @@ mod tests {
         // comparison_df.clone().show().await?;
 
         // Check if there are no pageranks with difference more than 0.0015
+        assert_eq!(comparison_df.count().await?, 0);
+
+        Ok(())
+    }
+
+    /// Verifies the early-stopping path in `PageRankBuilder::run`.
+    ///
+    /// When `max_iter` is `0` (the default, or set explicitly), the builder
+    /// uses `with_vertex_voting` to stop once the per-vertex rank change
+    /// falls below `tol`. The resulting ranks must still match the LDBC
+    /// reference within the same tolerance used by `test_pagerank_run`.
+    #[tokio::test]
+    async fn test_pagerank_run_early_stopping() -> Result<()> {
+        let test_dataset: &str = "test-pr-directed";
+        let graph = create_ldbc_test_graph(test_dataset, false, false).await?;
+        // `max_iter(0)` exercises the `with_vertex_voting` branch in
+        // `PageRankBuilder::run`. A tight `tol` keeps the converged ranks
+        // well within the comparison threshold below.
+        let calculated_page_rank = graph
+            .pagerank()
+            .max_iter(0)
+            .reset_prob(0.15)
+            .checkpoint_interval(1)
+            .tol(0.0001)
+            .run()
+            .await?;
+        let ldbc_page_rank = get_ldbc_pr_results(test_dataset).await?;
+
+        let comparison_df = calculated_page_rank
+            .join(
+                ldbc_page_rank,
+                JoinType::Left,
+                &[VERTEX_ID],
+                &["vertex_id"],
+                None,
+            )?
+            .with_column("difference", abs(col(PAGERANK) - col("expected_pr")))?
+            .filter(col("difference").gt(lit(0.01)))?;
+
+        // No pagerank should differ from the LDBC reference by more than 0.0015.
         assert_eq!(comparison_df.count().await?, 0);
 
         Ok(())
