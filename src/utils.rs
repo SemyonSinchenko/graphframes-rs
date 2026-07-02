@@ -1,5 +1,5 @@
-mod testing_utils;
 mod options;
+mod testing_utils;
 
 pub use options::GraphFramesConfig;
 pub(crate) use options::scoped_ctx;

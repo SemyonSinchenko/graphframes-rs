@@ -160,10 +160,7 @@ impl<'a> PageRankBuilder<'a> {
             .list(Some(&intermediate_path))
             .map_ok(|m| m.location)
             .boxed();
-        store
-            .delete_stream(objects)
-            .try_collect::<Vec<_>>()
-            .await?;
+        store.delete_stream(objects).try_collect::<Vec<_>>().await?;
 
         Ok(num_iterations)
     }

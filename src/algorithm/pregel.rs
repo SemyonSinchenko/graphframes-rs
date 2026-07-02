@@ -242,7 +242,7 @@ impl PregelBuilder {
             .cloned()
             .unwrap_or_default();
 
-	let ctx = &scoped_ctx(ctx, gf_config.prefer_smj);
+        let ctx = &scoped_ctx(ctx, gf_config.prefer_smj);
         // Validate configuration
         if self.messages.is_empty() {
             return Err(datafusion::error::DataFusionError::Plan(

@@ -96,18 +96,18 @@ impl ParquetCheckpointer {
 
         df.clone().write_parquet(&uri, options, None).await?;
 
-	// Empty dataframe is a valid case here,
-	// so we should check that there are files
-	// before an attempt to read back.
+        // Empty dataframe is a valid case here,
+        // so we should check that there are files
+        // before an attempt to read back.
         let store = ctx.runtime_env().object_store(&self.store_url)?;
         let wrote_any = store.list(Some(&dir)).next().await.is_some();
 
-	// This check is potentially dangereous:
-	// on slow remote object stores list-after-write
-	// may be empty and this may break the performance.
-	//
-	// It should not be a problem with modern implementations,
-	// so I'm not going to fix it right now.
+        // This check is potentially dangereous:
+        // on slow remote object stores list-after-write
+        // may be empty and this may break the performance.
+        //
+        // It should not be a problem with modern implementations,
+        // so I'm not going to fix it right now.
         if wrote_any {
             self.stored.push_back(dir);
             ctx.read_parquet(&uri, ParquetReadOptions::default()).await

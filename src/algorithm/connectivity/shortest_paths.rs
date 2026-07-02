@@ -109,9 +109,9 @@ impl<'a> ShortestPathsBuilder<'a> {
         // computes distance **from landmark to vertex** on the declared edges. To compute the
         // opposite direction (distance from each vertex back to a landmark), we physically
         // reverse the edges before handing them to Pregel — no other wiring changes.
-	//
-	// While Pregel core supports reversed and bi-directional messages, this does not allow
-	// to use skip_dest_state() optimization.
+        //
+        // While Pregel core supports reversed and bi-directional messages, this does not allow
+        // to use skip_dest_state() optimization.
         let new_edges = if self.to_landmarks {
             self.graph_frame.edges.clone().select(vec![
                 col(EDGE_DST).alias(EDGE_SRC),
@@ -153,16 +153,15 @@ impl<'a> ShortestPathsBuilder<'a> {
             let dist_col = format!("dist_{landmark}");
 
             // For the landmark itself: distance is 0; for all others: infinity.
-            let init_expr = when(col(VERTEX_ID).eq(lit(landmark)), lit(0i32))
-                .otherwise(lit(i32::MAX))?;
+            let init_expr =
+                when(col(VERTEX_ID).eq(lit(landmark)), lit(0i32)).otherwise(lit(i32::MAX))?;
 
             // If no message received (NULL from left join), keep existing distance.
             // Otherwise, keep the minimum of current and received distance.
-            let update_expr = when(pregel_msg(&lm_str).is_null(), col(&dist_col))
-                .otherwise(
-                    when(col(&dist_col).lt_eq(pregel_msg(&lm_str)), col(&dist_col))
-                        .otherwise(pregel_msg(&lm_str))?,
-                )?;
+            let update_expr = when(pregel_msg(&lm_str).is_null(), col(&dist_col)).otherwise(
+                when(col(&dist_col).lt_eq(pregel_msg(&lm_str)), col(&dist_col))
+                    .otherwise(pregel_msg(&lm_str))?,
+            )?;
 
             // Message: source vertex's distance + 1, capped at i32::MAX.
             let msg_expr = when(
@@ -208,8 +207,8 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::process::id;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use url::Url;
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -219,8 +218,7 @@ mod tests {
     /// `cargo test` invocations and concurrent tests.
     fn unique_temp_dir(label: &str) -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir =
-            std::env::temp_dir().join(format!("graphframes_sp_test_{}_{n}_{label}", id()));
+        let dir = std::env::temp_dir().join(format!("graphframes_sp_test_{}_{n}_{label}", id()));
         fs::create_dir_all(&dir).expect("failed to create unique temp dir");
         dir
     }
@@ -315,11 +313,7 @@ mod tests {
 
         let diff = comparison
             .filter(col("dist_1").not_eq(col("expected_dist_1")))?
-            .select(vec![
-                col(VERTEX_ID),
-                col("dist_1"),
-                col("expected_dist_1"),
-            ])?;
+            .select(vec![col(VERTEX_ID), col("dist_1"), col("expected_dist_1")])?;
 
         assert_eq!(
             diff.count().await?,
