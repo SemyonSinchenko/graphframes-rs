@@ -99,7 +99,8 @@ impl<'a> PageRankBuilder<'a> {
             .add_vertex_column(
                 PAGERANK,
                 lit(reset_prob_per_vertices), // All vertices start with a rank of 1/N
-                lit(reset_prob_per_vertices) + lit(alpha) * pregel_default_msg(),
+                lit(reset_prob_per_vertices)
+                    + lit(alpha) * coalesce(vec![pregel_default_msg(), lit(0.0)]),
             )
             .add_vertex_column("out_degree", col("out_degree"), col("out_degree"))
             .add_message(
@@ -121,8 +122,9 @@ impl<'a> PageRankBuilder<'a> {
                 .with_vertex_voting(
                     "rank_changed",
                     abs(col(PAGERANK)
-                        - (lit(reset_prob_per_vertices) + lit(alpha) * pregel_default_msg()))
-                    .lt(lit(self.tol)),
+                        - (lit(reset_prob_per_vertices)
+                            + lit(alpha) * coalesce(vec![pregel_default_msg(), lit(0.0)])))
+                    .gt(lit(self.tol)),
                 )
                 .run(ctx, &intermediate_uri, false)
                 .await?

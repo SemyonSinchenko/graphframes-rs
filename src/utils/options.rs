@@ -4,7 +4,7 @@ use datafusion::prelude::SessionContext;
 
 extensions_options! {
     pub struct GraphFramesConfig {
-        pub prefer_smj: bool, default = true
+        pub prefer_smj: bool, default = false
         pub checkpoint_dir: String, default = "_gf_checkpoints".to_owned()
     }
 }

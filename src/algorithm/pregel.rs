@@ -260,6 +260,7 @@ impl PregelBuilder {
 
         // run-id
         let run_id = Uuid::new_v4().to_string();
+        log::info!("start pregel with ID {run_id}");
 
         // Initialize vertices with initial expressions
         let mut current_vertices = self.graph.vertices.clone();
@@ -478,15 +479,19 @@ impl PregelBuilder {
                 )
                 .await?;
             if self.use_vertex_voting {
-                if current_vertices
+                let active_count = current_vertices
                     .clone()
                     .filter(col(self.activity_column.clone().unwrap()))?
                     .count()
-                    .await?
-                    == 0
-                {
+                    .await?;
+                log::info!(
+                    "iteration {iteration}, {active_count} vertices are particiapating in the loop"
+                );
+                if active_count == 0 {
                     break;
                 }
+            } else {
+                log::info!("iteration {iteration} / {max_iterations} completed")
             }
         }
 
@@ -505,6 +510,10 @@ impl PregelBuilder {
         current_vertices
             .write_parquet(output, DataFrameWriteOptions::new(), None)
             .await?;
+
+        log::info!(
+            "result was written into {output}, algorithm converged after {iteration} iterations"
+        );
 
         // clean up
         edges_checkpointer.purge(ctx).await?;
