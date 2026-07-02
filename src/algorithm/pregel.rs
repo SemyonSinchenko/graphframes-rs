@@ -373,12 +373,7 @@ impl PregelBuilder {
         );
         // offload prepared state to disk
         current_vertices = state_checkpointer
-            .push(
-                ctx,
-                "state-0",
-                current_vertices,
-                None,
-            )
+            .push(ctx, "state-0", current_vertices, None)
             .await?;
 
         // Main Pregel loop
@@ -471,12 +466,7 @@ impl PregelBuilder {
                 .select(update_columns.clone())?;
 
             current_vertices = state_checkpointer
-                .push(
-                    ctx,
-                    &format!("state-{}", iteration),
-                    new_vertices,
-                    None,
-                )
+                .push(ctx, &format!("state-{}", iteration), new_vertices, None)
                 .await?;
             if self.use_vertex_voting {
                 let active_count = current_vertices
