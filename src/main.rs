@@ -53,6 +53,7 @@ async fn main() -> Result<()> {
     let max_pool_mem = parse_mem(max_memory)?;
     let env = RuntimeEnvBuilder::new()
         .with_memory_pool(Arc::new(FairSpillPool::new(max_pool_mem)))
+        .with_temp_file_path(std::env::current_dir()?.join("gf_df_tmp"))
         .build_arc()?;
     let session_state = SessionStateBuilder::new()
         .with_config(SessionConfig::new().with_target_partitions(num_partition))
@@ -81,7 +82,12 @@ async fn main() -> Result<()> {
             .reset_prob(0.15)
             .max_iter(0)
             .tol(tol)
-            .set_checkpoint_dir(Path::from_filesystem_path("/tmp/gf_checkpoints")?)
+            .set_checkpoint_dir(Path::from(
+                std::env::current_dir()?
+                    .join("gf_checkpoints")
+                    .to_string_lossy()
+                    .as_ref(),
+            ))
             .run(&ctx, out, false)
             .await?;
 
