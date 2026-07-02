@@ -1,9 +1,10 @@
-mod connected_components;
-mod pagerank;
-mod pregel;
-mod shortest_paths;
-pub mod util;
+mod algorithm;
+mod expressions;
+mod memory;
+mod utils;
 
+use datafusion::arrow::datatypes::DataType;
+use datafusion::common::plan_err;
 use datafusion::error::Result;
 use datafusion::functions_aggregate::count::count;
 use datafusion::prelude::*;
@@ -54,15 +55,47 @@ pub const DST_VERTEX: &str = "dst_vertex";
 ///   "attr" => vec!["d", "j", "h"]
 /// ).unwrap();
 ///
-/// let graph = GraphFrame { vertices, edges };
+/// let graph = GraphFrame::try_new(vertices, edges).unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct GraphFrame {
-    pub vertices: DataFrame,
-    pub edges: DataFrame,
+    pub(crate) vertices: DataFrame,
+    pub(crate) edges: DataFrame,
 }
 
 impl GraphFrame {
+    pub fn try_new(vertices: DataFrame, edges: DataFrame) -> Result<Self> {
+        let vdt = vertices
+            .schema()
+            .field_with_unqualified_name(&VERTEX_ID.to_string())?
+            .data_type();
+        let srcdt = edges
+            .schema()
+            .field_with_unqualified_name(&EDGE_SRC.to_string())?
+            .data_type();
+        let dstdt = edges
+            .schema()
+            .field_with_unqualified_name(&EDGE_DST.to_string())?
+            .data_type();
+
+        if !vdt.equals_datatype(&DataType::Int64)
+            || !srcdt.equals_datatype(&DataType::Int64)
+            || !dstdt.equals_datatype(&DataType::Int64)
+        {
+            return plan_err!("ID, SRC and DST should have data type Int64 (LONG)");
+        }
+
+        Ok(Self { vertices, edges })
+    }
+
+    pub fn vertices(&self) -> DataFrame {
+        self.vertices.clone()
+    }
+
+    pub fn edges(&self) -> DataFrame {
+        self.edges.clone()
+    }
+
     /// Returns the total number of nodes in the graph.
     ///
     /// # Returns
@@ -86,7 +119,7 @@ impl GraphFrame {
     ///   "attr" => vec!["d", "j", "h"]
     /// ).unwrap();
     ///
-    /// let graph = GraphFrame { vertices, edges };
+    /// let graph = GraphFrame::try_new(vertices, edges).unwrap();
     /// let node_count = graph.num_nodes();
     /// ```
     pub async fn num_nodes(&self) -> Result<i64> {
@@ -117,7 +150,7 @@ impl GraphFrame {
     ///   "attr" => vec!["d", "j", "h"]
     /// ).unwrap();
     ///
-    /// let graph = GraphFrame { vertices, edges };
+    /// let graph = GraphFrame::try_new(vertices, edges).unwrap();
     /// let edge_count = graph.num_edges();
     /// ```
     pub async fn num_edges(&self) -> Result<i64> {
@@ -152,7 +185,7 @@ impl GraphFrame {
     ///   "attr" => vec!["d", "j", "h"]
     /// ).unwrap();
     ///
-    /// let graph = GraphFrame { vertices, edges };
+    /// let graph = GraphFrame::try_new(vertices, edges).unwrap();
     /// let edge_count = graph.in_degrees();
     /// ```
     pub async fn in_degrees(&self) -> Result<DataFrame> {
@@ -189,7 +222,7 @@ impl GraphFrame {
     ///   "attr" => vec!["d", "j", "h"]
     /// ).unwrap();
     ///
-    /// let graph = GraphFrame { vertices, edges };
+    /// let graph = GraphFrame::try_new(vertices, edges).unwrap();
     /// let edge_count = graph.in_degrees();
     /// ```
     pub async fn out_degrees(&self) -> Result<DataFrame> {
@@ -283,7 +316,7 @@ impl GraphFrame {
     ///   "attr" => vec!["d", "j", "h"]
     /// ).unwrap();
     ///
-    /// let graph = GraphFrame { vertices, edges };
+    /// let graph = GraphFrame::try_new(vertices, edges).unwrap();
     /// let triplets = graph.triplets();
     /// ```
     pub async fn triplets(&self) -> Result<DataFrame> {
@@ -558,6 +591,106 @@ mod tests {
             assert_eq!(in_degree_map.get(&id), out_degree_map.get(&id));
         }
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_try_new_missing_vertex_id() -> Result<()> {
+        // Vertices DataFrame is missing the VERTEX_ID column.
+        let vertices = dataframe!("name" => vec!["a", "b", "c"])?;
+        let edges = dataframe!(
+            EDGE_SRC => vec![1i64, 2i64, 3i64],
+            EDGE_DST => vec![3i64, 1i64, 2i64]
+        )?;
+
+        let result = GraphFrame::try_new(vertices, edges);
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_try_new_missing_edge_src() -> Result<()> {
+        // Edges DataFrame is missing the EDGE_SRC column.
+        let vertices = dataframe!(VERTEX_ID => vec![1i64, 2i64, 3i64])?;
+        let edges = dataframe!(
+            EDGE_DST => vec![3i64, 1i64, 2i64]
+        )?;
+
+        let result = GraphFrame::try_new(vertices, edges);
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_try_new_missing_edge_dst() -> Result<()> {
+        // Edges DataFrame is missing the EDGE_DST column.
+        let vertices = dataframe!(VERTEX_ID => vec![1i64, 2i64, 3i64])?;
+        let edges = dataframe!(
+            EDGE_SRC => vec![1i64, 2i64, 3i64]
+        )?;
+
+        let result = GraphFrame::try_new(vertices, edges);
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_try_new_vertex_id_wrong_type() -> Result<()> {
+        // VERTEX_ID uses i32 instead of i64 (Int64).
+        let vertices = dataframe!(
+            VERTEX_ID => vec![1i32, 2i32, 3i32],
+            "attr" => vec!["a", "b", "c"]
+        )?;
+        let edges = dataframe!(
+            EDGE_SRC => vec![1i64, 2i64, 3i64],
+            EDGE_DST => vec![3i64, 1i64, 2i64]
+        )?;
+
+        let result = GraphFrame::try_new(vertices, edges);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Int64"),
+            "error message should mention Int64, got: {err}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_try_new_edge_src_wrong_type() -> Result<()> {
+        // EDGE_SRC uses i32 instead of i64 (Int64).
+        let vertices = dataframe!(VERTEX_ID => vec![1i64, 2i64, 3i64])?;
+        let edges = dataframe!(
+            EDGE_SRC => vec![1i32, 2i32, 3i32],
+            EDGE_DST => vec![3i64, 1i64, 2i64]
+        )?;
+
+        let result = GraphFrame::try_new(vertices, edges);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Int64"),
+            "error message should mention Int64, got: {err}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_try_new_edge_dst_wrong_type() -> Result<()> {
+        // EDGE_DST uses i32 instead of i64 (Int64).
+        let vertices = dataframe!(VERTEX_ID => vec![1i64, 2i64, 3i64])?;
+        let edges = dataframe!(
+            EDGE_SRC => vec![1i64, 2i64, 3i64],
+            EDGE_DST => vec![3i32, 1i32, 2i32]
+        )?;
+
+        let result = GraphFrame::try_new(vertices, edges);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Int64"),
+            "error message should mention Int64, got: {err}"
+        );
         Ok(())
     }
 }

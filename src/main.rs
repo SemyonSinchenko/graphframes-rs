@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
         .await?;
     let edges = ctx.read_parquet(edges, ParquetReadOptions::new()).await?;
 
-    let graph = GraphFrame { vertices, edges };
+    let graph = GraphFrame::try_new(vertices, edges)?;
 
     if algorithm == "pagerank" {
         let tol = params.parse::<f64>().unwrap();
@@ -31,11 +31,10 @@ async fn main() -> Result<()> {
             .reset_prob(0.15)
             .max_iter(0) // zero iters mean until convergence
             .tol(tol)
-	    .checkpoint_interval(1)
-            .run()
+            .run(&ctx, "", false)
             .await?;
-        pr.write_csv(out, DataFrameWriteOptions::new(), Option::None)
-            .await?;
+        //pr.write_csv(out, DataFrameWriteOptions::new(), Option::None)
+        //    .await?;
     };
 
     Ok(())

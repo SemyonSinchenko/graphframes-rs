@@ -1,7 +1,7 @@
 use crate::GraphFrame;
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::error::Result;
-use datafusion::prelude::{CsvReadOptions, SessionContext};
+use datafusion::prelude::{CsvReadOptions, DataFrame, SessionContext};
 use std::collections::HashMap;
 use std::io::Result as ioResult;
 use std::{env, fs};
@@ -41,7 +41,7 @@ fn _create_edge_schema(is_weighted: bool) -> Schema {
 ///
 /// * `dataset`: The name of the dataset directory (e.g., "test-pr-directed").
 /// * `benchmark_run`: true for benchmark runs to read data from bench/data dir, false for tests to read data from testing/data.
-/// * `is_3d`: Boolean value that defines if edges has weights field or not.
+/// * `is_weighted`: Boolean value that defines if edges has weights field or not.
 pub async fn create_ldbc_test_graph(
     dataset: &str,
     benchmark_run: bool,
@@ -109,4 +109,69 @@ pub fn parse_ldbc_properties_file(
         }
     }
     Ok(properties_map)
+}
+
+pub(crate) async fn assert_dataframes_equal(a: DataFrame, b: DataFrame) -> Result<()> {
+    use datafusion::arrow::array::{Array, ArrayRef};
+    use datafusion::arrow::compute::cast;
+    use datafusion::arrow::datatypes::DataType;
+    use datafusion::arrow::datatypes::SchemaRef;
+    use datafusion::arrow::record_batch::RecordBatch;
+
+    async fn collect_and_concat(df: DataFrame) -> Result<RecordBatch> {
+        use datafusion::arrow::compute::concat_batches;
+        let schema: SchemaRef = df.schema().to_owned().into();
+        let batches = df.collect().await?;
+        Ok(concat_batches(&schema, &batches)?)
+    }
+
+    let ba = collect_and_concat(a).await?;
+    let bb = collect_and_concat(b).await?;
+    assert_eq!(ba.num_rows(), bb.num_rows(), "row count mismatch");
+    assert_eq!(ba.num_columns(), bb.num_columns(), "column count mismatch");
+
+    let schema_a = ba.schema();
+    let schema_b = bb.schema();
+
+    let is_string_like =
+        |t: &DataType| matches!(t, DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View);
+
+    for col_idx in 0..ba.num_columns() {
+        let field_a = schema_a.field(col_idx);
+        let field_b = schema_b.field(col_idx);
+        assert_eq!(
+            field_a.name(),
+            field_b.name(),
+            "column {col_idx} name mismatch"
+        );
+
+        let ca = ba.column(col_idx);
+        let cb = bb.column(col_idx);
+
+        // Normalise string-like arrays to Utf8View so the reader's physical type choice
+        // (Utf8 vs Utf8View) doesn't defeat value comparison.
+        let (na, nb): (ArrayRef, ArrayRef) = if is_string_like(ca.data_type())
+            && is_string_like(cb.data_type())
+            && ca.data_type() != cb.data_type()
+        {
+            let target = DataType::Utf8View;
+            (cast(ca.as_ref(), &target)?, cast(cb.as_ref(), &target)?)
+        } else {
+            (ca.clone(), cb.clone())
+        };
+
+        assert_eq!(
+            na.data_type(),
+            nb.data_type(),
+            "column {} normalised data type mismatch",
+            field_a.name()
+        );
+        assert_eq!(
+            na.as_ref(),
+            nb.as_ref(),
+            "column {} contents differ",
+            field_a.name()
+        );
+    }
+    Ok(())
 }

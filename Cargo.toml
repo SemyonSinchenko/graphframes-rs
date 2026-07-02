@@ -1,6 +1,6 @@
 [package]
 name = "graphframes-rs"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 
 exclude = [
@@ -9,8 +9,11 @@ exclude = [
 ]
 
 [dependencies]
-datafusion = "53.1.0"
+datafusion = "54"
 tokio = {version = "1", features = ["full"] }
+url = "2"
+futures = "0.3"
+uuid = {version = "1", features = ["v4"] }
 
 [dev-dependencies]
 criterion = { version = "0.7", features = ["html_reports", "async_tokio"] }
