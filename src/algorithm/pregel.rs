@@ -1,0 +1,1013 @@
+use crate::utils::{GraphFramesConfig, scoped_ctx};
+use crate::{EDGE_DST, EDGE_SRC, GraphFrame, VERTEX_ID};
+
+use crate::memory::{CheckpointConfig, ParquetCheckpointer};
+use datafusion::dataframe::DataFrameWriteOptions;
+use datafusion::error::Result;
+use datafusion::execution::object_store::ObjectStoreUrl;
+use datafusion::functions::core::expr_ext::FieldAccessor;
+use datafusion::object_store::path::Path;
+use datafusion::prelude::*;
+use std::vec;
+use uuid::Uuid;
+
+/// Message column name used in Pregel algorithm
+const PREGEL_MSG: &str = "__pregel_msg";
+const PREGEL_MSG_SRC: &str = "__pregel_msg_src";
+const PREGEL_MSG_DST: &str = "__pregel_msg_dst";
+const PREGEL_MSG_EDGE: &str = "__pregel_msg_edge";
+
+/// Direction of message passing in Pregel
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageDirection {
+    /// Send messages from source to destination
+    SrcToDst,
+    /// Send messages from destination to source
+    DstToSrc,
+    /// Send messages in both directions
+    Bidirectional,
+}
+
+/// Configuration for a vertex column in Pregel
+#[derive(Debug, Clone)]
+pub(crate) struct VertexColumn {
+    /// Name of the column
+    pub name: String,
+    /// Initial expression for the column
+    pub init_expr: Expr,
+    /// Update expression for the column
+    pub update_expr: Expr,
+}
+
+/// Configuration for a message in Pregel
+#[derive(Debug, Clone)]
+pub(crate) struct Message {
+    /// Name
+    pub name: String,
+    /// Expression to generate the message
+    pub expr: Expr,
+    /// Direction of the message
+    pub direction: MessageDirection,
+}
+
+/// Builder for Pregel algorithm configuration
+#[derive(Debug)]
+pub struct PregelBuilder {
+    /// Graph itself
+    graph: GraphFrame,
+    /// Maximum number of iterations
+    max_iterations: Option<usize>,
+    /// Whether to use vertex voting for early stopping
+    use_vertex_voting: bool,
+    /// Column name for an activity flag
+    activity_column: Option<String>,
+    /// Update condition for vertex voting
+    voting_condition: Option<Expr>,
+    /// Vertex columns to update
+    vertex_columns: Vec<VertexColumn>,
+    /// Edge columns to include
+    edge_columns: Vec<String>,
+    /// Column indicating whether a vertex participates in message generation
+    participation_column: Option<VertexColumn>,
+    /// Messages to send
+    messages: Vec<Message>,
+    /// Expressions to aggregate messages
+    aggregate_exprs: Vec<Expr>,
+    /// Whethere to require the destination vertex state
+    use_dest_sate: bool,
+
+    /// Storage options
+    checkpoint_config: CheckpointConfig,
+}
+
+pub fn pregel_src(col_name: &str) -> Expr {
+    col(format!("{}_{}", PREGEL_MSG_SRC, col_name))
+}
+
+pub fn pregel_dst(col_name: &str) -> Expr {
+    col(format!("{}_{}", PREGEL_MSG_DST, col_name))
+}
+
+pub fn pregel_edge(col_name: &str) -> Expr {
+    col(format!("{}_{}", PREGEL_MSG_EDGE, col_name))
+}
+
+pub fn pregel_msg(msg_name: &str) -> Expr {
+    col(format!("{}_{}", PREGEL_MSG, msg_name))
+}
+
+pub fn pregel_default_msg() -> Expr {
+    pregel_msg("msg")
+}
+
+impl PregelBuilder {
+    /// Create a new PregelBuilder
+    pub fn new(graph: GraphFrame) -> Self {
+        Self {
+            graph,
+            max_iterations: None,
+            use_vertex_voting: false,
+            activity_column: None,
+            voting_condition: None,
+            vertex_columns: Vec::new(),
+            edge_columns: vec![EDGE_SRC.to_string(), EDGE_DST.to_string()],
+            participation_column: None,
+            messages: Vec::new(),
+            aggregate_exprs: Vec::new(),
+            use_dest_sate: true,
+            checkpoint_config: CheckpointConfig::default_local_fs(),
+        }
+    }
+
+    /// Skip the destination state when building triplets
+    pub fn skip_dest_state(mut self) -> Self {
+        self.use_dest_sate = false;
+        self
+    }
+
+    /// Set the maximum number of iterations
+    pub fn max_iterations(mut self, max_iterations: usize) -> Self {
+        self.max_iterations = Some(max_iterations);
+        self
+    }
+
+    /// Enable vertex voting for early stopping
+    pub fn with_vertex_voting(mut self, activity_column: &str, voting_condition: Expr) -> Self {
+        self.use_vertex_voting = true;
+        self.activity_column = Some(activity_column.to_string());
+        self.voting_condition = Some(voting_condition);
+        self
+    }
+
+    /// Add a vertex column to update
+    pub fn add_vertex_column(mut self, name: &str, init_expr: Expr, update_expr: Expr) -> Self {
+        self.vertex_columns.push(VertexColumn {
+            name: name.to_string(),
+            init_expr,
+            update_expr,
+        });
+        self
+    }
+
+    /// Add an edge column to include
+    pub fn add_edge_column(mut self, name: &str) -> Self {
+        if !self.edge_columns.contains(&name.to_string()) {
+            self.edge_columns.push(name.to_string());
+        }
+        self
+    }
+
+    /// Set the participation column
+    pub fn with_participation_column(
+        mut self,
+        column: &str,
+        initial_expr: Expr,
+        update_condition: Expr,
+    ) -> Self {
+        self.participation_column = Some(VertexColumn {
+            name: column.to_string(),
+            init_expr: initial_expr,
+            update_expr: update_condition,
+        });
+        self
+    }
+
+    /// Add a message to send
+    pub fn add_message(mut self, expr: Expr, direction: MessageDirection) -> Self {
+        self.messages.push(Message {
+            name: "msg".to_string(),
+            expr: expr,
+            direction: direction,
+        });
+        self
+    }
+
+    /// Add a named message to send
+    pub fn add_named_message(
+        mut self,
+        name: &str,
+        expr: Expr,
+        direction: MessageDirection,
+    ) -> Self {
+        self.messages.push(Message {
+            name: name.to_string(),
+            expr: expr,
+            direction: direction,
+        });
+        self
+    }
+
+    /// Add an expression to aggregate messages
+    pub fn add_aggregate_expr(mut self, expr: Expr) -> Self {
+        self.aggregate_exprs
+            .push(expr.alias(format!("{}_{}", PREGEL_MSG, "msg")));
+        self
+    }
+
+    /// Add a named expression to aggregate messages
+    pub fn add_named_aggregate_expr(mut self, name: &str, expr: Expr) -> Self {
+        self.aggregate_exprs
+            .push(expr.alias(format!("{}_{}", PREGEL_MSG, name)));
+        self
+    }
+
+    /// Set the object store URL
+    pub fn with_checkpoint_store(mut self, store_url: ObjectStoreUrl) -> Self {
+        self.checkpoint_config.store_url = store_url;
+        self
+    }
+
+    /// Set the checkpoint directory
+    pub fn set_checkpoint_dir(mut self, dir: Path) -> Self {
+        self.checkpoint_config.dir = dir;
+        self
+    }
+
+    /// Build and run the Pregel algorithm
+    ///
+    /// Returns the DataFrame with the vertex columns after running the algorithm.
+    /// If include_debug_columns is true, it will also include activity flags, voting, etc.
+    pub async fn run(
+        self,
+        ctx: &SessionContext,
+        output: &str,
+        include_debug_columns: bool,
+    ) -> Result<usize> {
+        let gf_config = ctx
+            .state()
+            .config()
+            .options()
+            .extensions
+            .get::<GraphFramesConfig>()
+            .cloned()
+            .unwrap_or_default();
+
+        let ctx = &scoped_ctx(ctx, gf_config.prefer_smj);
+        // Validate configuration
+        if self.messages.is_empty() {
+            return Err(datafusion::error::DataFusionError::Plan(
+                "No messages defined for Pregel algorithm".to_string(),
+            ));
+        }
+
+        if self.aggregate_exprs.is_empty() && self.messages.len() > 1 {
+            return Err(datafusion::error::DataFusionError::Plan(
+                "Aggregate expression is required when multiple messages are defined".to_string(),
+            ));
+        }
+
+        self.checkpoint_config.validate_output(output)?;
+
+        // run-id
+        let run_id = Uuid::new_v4().to_string();
+        log::info!("start pregel with ID {run_id}");
+
+        // Initialize vertices with initial expressions
+        let mut current_vertices = self.graph.vertices.clone();
+        for column in &self.vertex_columns {
+            current_vertices =
+                current_vertices.with_column(&column.name, column.init_expr.clone())?;
+        }
+
+        let mut iteration = 0;
+        let max_iterations = self.max_iterations.unwrap_or(usize::MAX);
+
+        let mut messages = Vec::<(&str, Expr)>::new();
+
+        for message in &self.messages {
+            match message.direction {
+                MessageDirection::SrcToDst => messages.push((
+                    &message.name,
+                    named_struct(vec![
+                        lit(VERTEX_ID),
+                        pregel_edge(EDGE_DST),
+                        lit(&message.name),
+                        message.expr.clone(),
+                    ]),
+                )),
+                MessageDirection::DstToSrc => messages.push((
+                    &message.name,
+                    named_struct(vec![
+                        lit(VERTEX_ID),
+                        pregel_edge(EDGE_SRC),
+                        lit(&message.name),
+                        message.expr.clone(),
+                    ]),
+                )),
+                MessageDirection::Bidirectional => {
+                    messages.push((
+                        &message.name,
+                        named_struct(vec![
+                            lit(VERTEX_ID),
+                            pregel_edge(EDGE_SRC),
+                            lit(&message.name),
+                            message.expr.clone(),
+                        ]),
+                    ));
+                    messages.push((
+                        &message.name,
+                        named_struct(vec![
+                            lit(VERTEX_ID),
+                            pregel_edge(EDGE_DST),
+                            lit(&message.name),
+                            message.expr.clone(),
+                        ]),
+                    ));
+                }
+            }
+        }
+
+        let mut update_columns = self
+            .vertex_columns
+            .iter()
+            .map(|column| column.update_expr.clone().alias(column.name.clone()))
+            .collect::<Vec<Expr>>();
+
+        if self.use_vertex_voting {
+            let activity_column = self.activity_column.as_ref().unwrap();
+            current_vertices = current_vertices.with_column(activity_column, lit(true))?;
+            update_columns.push(
+                self.voting_condition
+                    .unwrap_or(lit(true))
+                    .alias(self.activity_column.clone().unwrap()),
+            );
+        }
+        // Initialize participation column if specified
+        if self.participation_column.is_some() {
+            let participation_column = self.participation_column.as_ref().unwrap();
+            current_vertices = current_vertices.with_column(
+                &participation_column.name,
+                participation_column.init_expr.clone(),
+            )?;
+            update_columns.push(
+                participation_column
+                    .update_expr
+                    .clone()
+                    .alias(participation_column.name.clone()),
+            );
+        }
+        update_columns.push(col(VERTEX_ID).alias(VERTEX_ID));
+
+        // prepare and offload edges to disk
+        let mut edges_checkpointer = ParquetCheckpointer::new(
+            self.checkpoint_config.store_url.clone(),
+            self.checkpoint_config.dir.clone().join(run_id.clone()),
+        );
+        let edges_struct = edges_checkpointer
+            .push(
+                ctx,
+                "edges",
+                self.graph.edges.clone().select(
+                    self.edge_columns
+                        .iter()
+                        .map(|name| col(name).alias(format!("{}_{}", PREGEL_MSG_EDGE, name))),
+                )?,
+                None,
+            )
+            .await?;
+
+        // state checkpointer
+        let mut state_checkpointer = ParquetCheckpointer::new(
+            self.checkpoint_config.store_url.clone(),
+            self.checkpoint_config.dir.clone().join(run_id.clone()),
+        );
+        // offload prepared state to disk
+        current_vertices = state_checkpointer
+            .push(
+                ctx,
+                "state-0",
+                current_vertices,
+                None,
+            )
+            .await?;
+
+        // Main Pregel loop
+        while iteration < max_iterations {
+            iteration += 1;
+            let src_vertices =
+                current_vertices
+                    .clone()
+                    .select(current_vertices.schema().fields().iter().map(|field| {
+                        col(field.name()).alias(format!("{}_{}", PREGEL_MSG_SRC, field.name()))
+                    }))?;
+
+            let mut triplets = src_vertices.clone().join_on(
+                edges_struct.clone(),
+                JoinType::Inner,
+                vec![pregel_src(VERTEX_ID).eq(pregel_edge(EDGE_SRC))],
+            )?;
+
+            if self.use_dest_sate {
+                let dst_vertices = current_vertices.clone().select(
+                    current_vertices.schema().fields().iter().map(|field| {
+                        col(field.name()).alias(format!("{}_{}", PREGEL_MSG_DST, field.name()))
+                    }),
+                )?;
+                triplets = triplets.join_on(
+                    dst_vertices,
+                    JoinType::Inner,
+                    vec![pregel_dst(VERTEX_ID).eq(pregel_edge(EDGE_DST))],
+                )?;
+            }
+
+            // If participation_column is present, skip triplets where both src and dst
+            // are not participating in iteration.
+            if self.participation_column.is_some() {
+                let participation_column = self.participation_column.as_ref().unwrap();
+
+                if self.use_dest_sate {
+                    triplets = triplets.filter(
+                        pregel_src(&participation_column.name)
+                            .or(pregel_dst(&participation_column.name)),
+                    )?;
+                } else {
+                    triplets = triplets.filter(pregel_src(&participation_column.name))?;
+                }
+            }
+
+            // Unfortunately, "unnest" does not allow passing to it an array of expression;
+            // It throws "NotImplementedError"
+            // "Unnest should be rewritten to LogicalPlan::Unnest before type coercion"
+            //
+            // Union should be considered as a workaround here.
+            let messages_df = messages
+                .iter()
+                .map(|(name, message)| {
+                    triplets.clone().select(vec![
+                        message.clone().field(VERTEX_ID).alias(VERTEX_ID),
+                        message
+                            .clone()
+                            .field(*name)
+                            .alias(format!("{}_{}", PREGEL_MSG, name)),
+                    ])
+                })
+                .reduce(|a, b| match (a, b) {
+                    (Ok(adf), Ok(bdf)) => adf.union_by_name(bdf),
+                    _ => Err(datafusion::error::DataFusionError::Plan(
+                        "Error in Pregel algorithm".to_string(),
+                    )),
+                })
+                .ok_or(datafusion::error::DataFusionError::Plan(
+                    "generated messages_df is None".to_string(),
+                ))??;
+
+            let aggregated_messages = if !self.aggregate_exprs.clone().is_empty() {
+                messages_df.aggregate(vec![col(VERTEX_ID)], self.aggregate_exprs.clone())?
+            } else {
+                messages_df
+            };
+
+            let vertices_with_messages = current_vertices
+                .clone()
+                .join_on(
+                    aggregated_messages.with_column_renamed(VERTEX_ID, "am_vid")?,
+                    JoinType::Left,
+                    vec![col(VERTEX_ID).eq(col("am_vid"))],
+                )?
+                .drop_columns(&["am_vid"])?;
+
+            let new_vertices = vertices_with_messages
+                .clone()
+                .select(update_columns.clone())?;
+
+            current_vertices = state_checkpointer
+                .push(
+                    ctx,
+                    &format!("state-{}", iteration),
+                    new_vertices,
+                    None,
+                )
+                .await?;
+            if self.use_vertex_voting {
+                let active_count = current_vertices
+                    .clone()
+                    .filter(col(self.activity_column.clone().unwrap()))?
+                    .count()
+                    .await?;
+                log::info!(
+                    "iteration {iteration}, {active_count} vertices are particiapating in the loop"
+                );
+                if active_count == 0 {
+                    break;
+                }
+            } else {
+                log::info!("iteration {iteration} / {max_iterations} completed")
+            }
+        }
+
+        // If include_debug_columns is false, drop the debug columns
+        if !include_debug_columns {
+            let mut required_columns = self
+                .vertex_columns
+                .iter()
+                .map(|column| col(column.clone().name))
+                .collect::<Vec<Expr>>();
+            required_columns.push(col(VERTEX_ID));
+            current_vertices = current_vertices.select(required_columns)?;
+        }
+
+        // Write to out
+        current_vertices
+            .write_parquet(output, DataFrameWriteOptions::new(), None)
+            .await?;
+
+        log::info!(
+            "result was written into {output}, algorithm converged after {iteration} iterations"
+        );
+
+        // clean up
+        edges_checkpointer.purge(ctx).await?;
+        state_checkpointer.purge(ctx).await?;
+
+        Ok(iteration)
+    }
+}
+
+impl GraphFrame {
+    /// Create a new Pregel algorithm builder
+    pub fn pregel(&self) -> PregelBuilder {
+        PregelBuilder::new(self.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::array::{Array, Int32Array, Int64Array};
+    use datafusion::functions_aggregate::min_max::max;
+    use datafusion::functions_aggregate::sum::sum;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::id;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use url::Url;
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Returns a unique directory under `std::env::temp_dir()` for this test run, creating it.
+    /// Combining the PID with a process-wide counter guarantees uniqueness across parallel
+    /// `cargo test` invocations and concurrent tests.
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("graphframes_pregel_test_{}_{n}_{label}", id()));
+        fs::create_dir_all(&dir).expect("failed to create unique temp dir");
+        dir
+    }
+
+    /// RAII guard that recursively removes the temp directory when dropped, so tests stay
+    /// self-contained without depending on the `tempfile` crate.
+    struct TempGuard(PathBuf);
+    impl Drop for TempGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Builds a `SessionContext`, an object_store checkpoint `Path`, an output `file://` URI,
+    /// and a `TempGuard` that cleans up on drop. The parent temp dir contains two non-overlapping
+    /// siblings — `checkpoints/` and `output/` — so `validate_output` is satisfied.
+    fn setup(label: &str) -> Result<(SessionContext, Path, String, TempGuard)> {
+        let parent = unique_temp_dir(label);
+        let checkpoint_root = parent.join("checkpoints");
+        let output_root = parent.join("output");
+        fs::create_dir_all(&checkpoint_root).expect("failed to create checkpoint dir");
+        fs::create_dir_all(&output_root).expect("failed to create output dir");
+
+        let checkpoint_dir = Path::from_filesystem_path(&checkpoint_root)
+            .expect("checkpoint dir must be convertible to object_store path");
+        let output_uri = Url::from_directory_path(&output_root)
+            .expect("output dir must be convertible to file:// URL")
+            .to_string();
+
+        let ctx = SessionContext::new();
+        Ok((ctx, checkpoint_dir, output_uri, TempGuard(parent)))
+    }
+
+    fn create_graph(vertices: Vec<i64>, edges: Vec<Vec<i64>>) -> Result<GraphFrame> {
+        let vertices_df = dataframe!(
+            VERTEX_ID => Vec::<i64>::from(vertices),
+        )?;
+        let edges_df = dataframe!(EDGE_SRC => Vec::<i64>::from(
+            edges.iter().map(|e| e[0]).collect::<Vec<i64>>()
+        ), EDGE_DST => Vec::<i64>::from(
+            edges.iter().map(|e| e[1]).collect::<Vec<i64>>()
+        ))?;
+
+        Ok(GraphFrame {
+            vertices: vertices_df,
+            edges: edges_df,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_pregel_zero_iterations() -> Result<()> {
+        let (ctx, checkpoint_dir, output_uri, _guard) = setup("zero_iterations")?;
+        let graph = create_graph(vec![1, 2, 3], vec![vec![1, 2], vec![2, 3]])?;
+        graph
+            .pregel()
+            .max_iterations(0)
+            .set_checkpoint_dir(checkpoint_dir)
+            .with_participation_column("participation", lit(true), lit(true))
+            .with_vertex_voting("activity", lit(true))
+            .add_vertex_column("value", lit(0), col("value"))
+            .add_message(lit(1), MessageDirection::SrcToDst)
+            .run(&ctx, &output_uri, true)
+            .await?;
+
+        let result = ctx
+            .read_parquet(&output_uri, ParquetReadOptions::default())
+            .await?;
+
+        let result_schema = result.schema();
+        assert_eq!(result_schema.fields().len(), 4);
+        assert_eq!(result_schema.fields()[0].name(), "id");
+        assert_eq!(result_schema.fields()[1].name(), "value");
+        assert_eq!(result_schema.fields()[2].name(), "activity");
+        assert_eq!(result_schema.fields()[3].name(), "participation");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pregel_in_degree() -> Result<()> {
+        let (ctx, checkpoint_dir, output_uri, _guard) = setup("in_degree")?;
+        let graph = create_graph(vec![1, 2, 3], vec![vec![1, 2], vec![2, 3], vec![1, 3]])?;
+        graph
+            .pregel()
+            .max_iterations(1)
+            .set_checkpoint_dir(checkpoint_dir)
+            .add_vertex_column("in_degree", lit(0), col("in_degree") + pregel_default_msg())
+            .add_message(lit(1), MessageDirection::SrcToDst)
+            .add_aggregate_expr(sum(pregel_default_msg()))
+            .skip_dest_state()
+            .run(&ctx, &output_uri, false)
+            .await?;
+
+        let result = ctx
+            .read_parquet(&output_uri, ParquetReadOptions::default())
+            .await?;
+        let counts = result
+            .select(vec![col("id"), col("in_degree")])?
+            .sort(vec![col("id").sort(true, false)])?
+            .collect()
+            .await?;
+
+        assert_eq!(
+            counts[0]
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values(),
+            &[0, 1, 2]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pregel_out_degree() -> Result<()> {
+        let (ctx, checkpoint_dir, output_uri, _guard) = setup("out_degree")?;
+        let graph = create_graph(vec![1, 2, 3], vec![vec![1, 2], vec![2, 3], vec![1, 3]])?;
+        graph
+            .pregel()
+            .max_iterations(1)
+            .set_checkpoint_dir(checkpoint_dir)
+            .add_vertex_column(
+                "out_degree",
+                lit(0),
+                col("out_degree") + coalesce(vec![pregel_default_msg(), lit(0)]),
+            )
+            .add_message(lit(1), MessageDirection::DstToSrc)
+            .add_aggregate_expr(sum(pregel_default_msg()))
+            .run(&ctx, &output_uri, false)
+            .await?;
+
+        let result = ctx
+            .read_parquet(&output_uri, ParquetReadOptions::default())
+            .await?;
+        let counts = result
+            .select(vec![col("id"), col("out_degree")])?
+            .sort(vec![col("id").sort(true, false)])?
+            .collect()
+            .await?;
+
+        assert_eq!(
+            counts[0]
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values(),
+            &[2, 1, 0]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pregel_loop() -> Result<()> {
+        let (ctx, checkpoint_dir, output_uri, _guard) = setup("loop")?;
+        let graph = create_graph(vec![1], vec![vec![1, 1]])?;
+        graph
+            .pregel()
+            .max_iterations(1)
+            .set_checkpoint_dir(checkpoint_dir)
+            .add_vertex_column("loop", lit(0), col("loop") + pregel_default_msg())
+            .add_message(lit(1), MessageDirection::SrcToDst)
+            .add_aggregate_expr(sum(pregel_default_msg()))
+            .skip_dest_state()
+            .run(&ctx, &output_uri, false)
+            .await?;
+
+        let result = ctx
+            .read_parquet(&output_uri, ParquetReadOptions::default())
+            .await?;
+        let counts = result.select(vec![col("loop")])?.collect().await?;
+
+        assert_eq!(
+            counts[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values(),
+            &[1]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pregel_no_edges() -> Result<()> {
+        let (ctx, checkpoint_dir, output_uri, _guard) = setup("no_edges")?;
+        let graph = create_graph(vec![1, 2], vec![])?;
+        graph
+            .pregel()
+            .max_iterations(1)
+            .set_checkpoint_dir(checkpoint_dir)
+            .add_vertex_column("value", lit(0), col("value") + pregel_default_msg())
+            .add_message(lit(1), MessageDirection::SrcToDst)
+            .add_aggregate_expr(sum(pregel_default_msg()))
+            .skip_dest_state()
+            .run(&ctx, &output_uri, false)
+            .await?;
+
+        let result = ctx
+            .read_parquet(&output_uri, ParquetReadOptions::default())
+            .await?;
+        let values = result.select(vec![col("value")])?.collect().await?;
+
+        assert_eq!(
+            values[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values(),
+            &[0, 0]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pregel_chain_propagation() -> Result<()> {
+        let (ctx, checkpoint_dir, output_uri, _guard) = setup("chain_propagation")?;
+        // Create a chain graph: 1 -> 2 -> 3 -> 4
+        let graph = create_graph(vec![1, 2, 3, 4], vec![vec![1, 2], vec![2, 3], vec![3, 4]])?;
+
+        let num_iterations = graph
+            .pregel()
+            .max_iterations(100) // We should check that voting works
+            .set_checkpoint_dir(checkpoint_dir)
+            .add_vertex_column(
+                "value",
+                when(col("id").eq(lit(1)), lit(1)).otherwise(lit(0))?,
+                when(pregel_default_msg().gt(col("value")), pregel_default_msg())
+                    .otherwise(col("value"))?,
+            )
+            .with_vertex_voting("active", col("value").not_eq(pregel_default_msg()))
+            .add_message(pregel_src("value"), MessageDirection::SrcToDst)
+            .add_aggregate_expr(max(pregel_default_msg()))
+            .skip_dest_state()
+            .run(&ctx, &output_uri, false)
+            .await?;
+
+        // In four iterations it should converge
+        assert_eq!(num_iterations, 4);
+
+        let result = ctx
+            .read_parquet(&output_uri, ParquetReadOptions::default())
+            .await?;
+        let values = result.select(vec![col("value")])?.collect().await?;
+
+        let mut values_vec: Vec<i32> = Vec::new();
+        for batch in values.iter() {
+            values_vec.append(
+                &mut batch
+                    .column(0)
+                    .clone()
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec(),
+            );
+        }
+
+        // All vertices should have value 1
+        assert!(values_vec.iter().all(|&x| x == 1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pregel_back_chain_propagation() -> Result<()> {
+        let (ctx, checkpoint_dir, output_uri, _guard) = setup("back_chain_propagation")?;
+        // Create a chain graph: 1 -> 2 -> 3 -> 4
+        let graph = create_graph(vec![1, 2, 3, 4], vec![vec![1, 2], vec![2, 3], vec![3, 4]])?;
+
+        let num_iterations = graph
+            .pregel()
+            .max_iterations(100) // We should check that voting works
+            .set_checkpoint_dir(checkpoint_dir)
+            .add_vertex_column(
+                "value",
+                when(col("id").eq(lit(4)), lit(1)).otherwise(lit(0))?,
+                when(pregel_default_msg().gt(col("value")), pregel_default_msg())
+                    .otherwise(col("value"))?,
+            )
+            .with_vertex_voting("active", col("value").not_eq(pregel_default_msg()))
+            .add_message(pregel_dst("value"), MessageDirection::DstToSrc)
+            .add_aggregate_expr(max(pregel_default_msg()))
+            .run(&ctx, &output_uri, false)
+            .await?;
+
+        // In four iterations it should converge
+        assert_eq!(num_iterations, 4);
+
+        let result = ctx
+            .read_parquet(&output_uri, ParquetReadOptions::default())
+            .await?;
+        let values = result.select(vec![col("value")])?.collect().await?;
+
+        let mut values_vec: Vec<i32> = Vec::new();
+        for batch in values.iter() {
+            values_vec.append(
+                &mut batch
+                    .column(0)
+                    .clone()
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec(),
+            );
+        }
+
+        // All vertices should have value 1
+        assert!(values_vec.iter().all(|&x| x == 1));
+        Ok(())
+    }
+
+    /// Validates that multiple *named* messages survive as independent columns through the
+    /// `union_by_name` step, and that a single aggregate expression correctly targets only its
+    /// referenced message column.
+    ///
+    /// Graph: 1 -> 2, 1 -> 3. Two named messages are sent SrcToDst:
+    ///   "a" = 1, "b" = 10.
+    /// Only "a" is aggregated (sum). If `union_by_name` were broken (plain `union` by position),
+    /// message "b" values (10) would silently land in the `__pregel_msg_a` column, making the
+    /// sum for vertices 2 and 3 equal to 11 instead of 1.
+    #[tokio::test]
+    async fn test_pregel_multi_message_single_aggregate() -> Result<()> {
+        let (ctx, checkpoint_dir, output_uri, _guard) = setup("multi_msg_single_agg")?;
+        let graph = create_graph(vec![1, 2, 3], vec![vec![1, 2], vec![1, 3]])?;
+        graph
+            .pregel()
+            .max_iterations(1)
+            .set_checkpoint_dir(checkpoint_dir)
+            .add_vertex_column("va", lit(0i64), col("va") + pregel_default_msg())
+            .add_named_message("a", lit(1i64), MessageDirection::SrcToDst)
+            .add_named_message("b", lit(10i64), MessageDirection::SrcToDst)
+            .add_aggregate_expr(sum(pregel_msg("a")))
+            .skip_dest_state()
+            .run(&ctx, &output_uri, false)
+            .await?;
+
+        let result = ctx
+            .read_parquet(&output_uri, ParquetReadOptions::default())
+            .await?;
+        let counts = result
+            .select(vec![col("id"), col("va")])?
+            .sort(vec![col("id").sort(true, false)])?
+            .collect()
+            .await?;
+
+        assert_eq!(
+            counts[0]
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values(),
+            &[0, 1, 1] // vertex 1 has no incoming edges → NULL → 0; vertices 2,3 get only msg "a" = 1
+        );
+        Ok(())
+    }
+
+    /// Validates that multiple named messages paired with multiple named aggregates each
+    /// produce independent aggregated columns that update expressions can reference separately.
+    ///
+    /// Graph: 1 -> 2, 1 -> 3. Two named messages SrcToDst: "a" = 1, "b" = 10.
+    /// Two named aggregates: sum("a"), max("b"). Two vertex columns updated independently.
+    #[tokio::test]
+    async fn test_pregel_multi_message_multi_aggregate() -> Result<()> {
+        let (ctx, checkpoint_dir, output_uri, _guard) = setup("multi_msg_multi_agg")?;
+        let graph = create_graph(vec![1, 2, 3], vec![vec![1, 2], vec![1, 3]])?;
+        graph
+            .pregel()
+            .max_iterations(1)
+            .set_checkpoint_dir(checkpoint_dir)
+            .add_vertex_column("va", lit(0i64), col("va") + pregel_msg("a"))
+            .add_vertex_column("vb", lit(0i64), col("vb") + pregel_msg("b"))
+            .add_named_message("a", lit(1i64), MessageDirection::SrcToDst)
+            .add_named_message("b", lit(10i64), MessageDirection::SrcToDst)
+            .add_named_aggregate_expr("a", sum(pregel_msg("a")))
+            .add_named_aggregate_expr("b", max(pregel_msg("b")))
+            .skip_dest_state()
+            .run(&ctx, &output_uri, false)
+            .await?;
+
+        let result = ctx
+            .read_parquet(&output_uri, ParquetReadOptions::default())
+            .await?;
+        let counts = result
+            .select(vec![col("id"), col("va"), col("vb")])?
+            .sort(vec![col("id").sort(true, false)])?
+            .collect()
+            .await?;
+
+        let va = counts[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .values();
+        let vb = counts[0]
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .values();
+
+        assert_eq!(va, &[0, 1, 1]); // sum of msg "a"
+        assert_eq!(vb, &[0, 10, 10]); // max of msg "b"
+        Ok(())
+    }
+
+    fn create_circle_edges(n: i64) -> Vec<Vec<i64>> {
+        let mut edges = Vec::new();
+        for i in 0..n {
+            edges.push(vec![i, (i + 1) % n]);
+            edges.push(vec![i, (i + n - 1) % n]);
+        }
+        edges
+    }
+
+    #[tokio::test]
+    async fn test_pregel_long_iterations() -> Result<()> {
+        let (ctx, checkpoint_dir, output_uri, _guard) = setup("long_iterations")?;
+        let n = 100;
+        let vertices: Vec<i64> = (0..n).collect();
+        let edges = create_circle_edges(n);
+        let graph = create_graph(vertices, edges)?;
+
+        graph
+            .pregel()
+            .max_iterations(40)
+            .set_checkpoint_dir(checkpoint_dir)
+            .add_vertex_column("value", lit(0), col("value") + pregel_default_msg())
+            .add_message(lit(1), MessageDirection::Bidirectional)
+            .add_aggregate_expr(sum(pregel_default_msg()))
+            .run(&ctx, &output_uri, false)
+            .await?;
+
+        let result = ctx
+            .read_parquet(&output_uri, ParquetReadOptions::default())
+            .await?;
+        let values = result.select(vec![col("value")])?.collect().await?;
+
+        let mut values_vec: Vec<i64> = Vec::new();
+        for batch in values.iter() {
+            values_vec.append(
+                &mut batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec(),
+            );
+        }
+
+        assert!(values_vec.iter().all(|&x| x == 160));
+        Ok(())
+    }
+}

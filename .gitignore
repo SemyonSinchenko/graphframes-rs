@@ -7,4 +7,10 @@
 debug/
 release/
 /benches/data/
-
+~*
+*~
+\#*
+*#
+*.parquet
+gf_df_tmp*
+gf_checkpoints*

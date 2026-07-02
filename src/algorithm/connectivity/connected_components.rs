@@ -204,7 +204,7 @@ impl GraphFrame {
     /// use graphframes_rs::{GraphFrame, VERTEX_ID, EDGE_SRC, EDGE_DST};
     /// let vertices = dataframe!(VERTEX_ID => vec![1i64, 2i64, 3i64]).unwrap();
     /// let edges = dataframe!(EDGE_SRC => vec![1i64, 2i64, 3i64], EDGE_DST => vec![3i64, 1i64, 2i64]).unwrap();
-    /// let graph = GraphFrame { vertices, edges };
+    /// let graph = GraphFrame::try_new(vertices, edges).unwrap();
     /// let components = graph.connected_components().run();
     /// ```
     pub fn connected_components(&self) -> ConnectedComponentsBuilder<'_> {
@@ -216,7 +216,7 @@ impl GraphFrame {
 mod tests {
     use super::*;
     use crate::tests::create_test_graph;
-    use crate::util::create_ldbc_test_graph;
+    use crate::utils::create_ldbc_test_graph;
     use datafusion::arrow::array::Int64Array;
     use datafusion::arrow::datatypes::{Field, Schema};
 
