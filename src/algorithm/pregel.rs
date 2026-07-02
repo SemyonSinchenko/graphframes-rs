@@ -362,7 +362,7 @@ impl PregelBuilder {
                         .iter()
                         .map(|name| col(name).alias(format!("{}_{}", PREGEL_MSG_EDGE, name))),
                 )?,
-                Some(format!("{}_{}", PREGEL_MSG_EDGE, EDGE_SRC)),
+                None,
             )
             .await?;
 
@@ -377,7 +377,7 @@ impl PregelBuilder {
                 ctx,
                 "state-0",
                 current_vertices,
-                Some(VERTEX_ID.to_string()),
+                None,
             )
             .await?;
 
@@ -475,7 +475,7 @@ impl PregelBuilder {
                     ctx,
                     &format!("state-{}", iteration),
                     new_vertices,
-                    Some(VERTEX_ID.to_string()),
+                    None,
                 )
                 .await?;
             if self.use_vertex_voting {

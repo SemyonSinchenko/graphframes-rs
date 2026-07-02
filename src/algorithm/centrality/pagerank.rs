@@ -76,10 +76,9 @@ impl<'a> PageRankBuilder<'a> {
         output: &str,
         _include_debug_columns: bool,
     ) -> Result<usize> {
-        let num_vertices = self.graph.num_nodes().await? as f64;
         // Defaults to 0.85 if default reset_prob is used: 0.15
         let alpha = 1.0 - self.reset_prob;
-        let reset_prob_per_vertices = self.reset_prob / num_vertices;
+        let reset_prob_per_vertices = self.reset_prob;
 
         // PageRank needs the out-degree of each vertex to distribute its rank.
         let vertices_with_degrees = self.graph.out_degrees().await?;
