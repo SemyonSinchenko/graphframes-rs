@@ -1,4 +1,5 @@
 mod options;
+#[cfg(test)]
 mod testing_utils;
 
 pub use options::GraphFramesConfig;
