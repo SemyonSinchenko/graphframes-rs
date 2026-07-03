@@ -127,6 +127,17 @@ impl ParquetCheckpointer {
         Ok(())
     }
 
+    pub(crate) async fn remove_last(&mut self, ctx: &SessionContext, n: usize) -> Result<()> {
+        let store = ctx.runtime_env().object_store(&self.store_url)?;
+        let to_remove = n.min(self.stored.len());
+        for _ in 0..to_remove {
+            let dir = self.stored.pop_back().unwrap();
+            let paths = store.list(Some(&dir)).map_ok(|m| m.location).boxed();
+            store.delete_stream(paths).try_collect::<Vec<_>>().await?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn purge(&mut self, ctx: &SessionContext) -> Result<()> {
         self.evict(ctx, self.stored.len()).await
     }

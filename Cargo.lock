@@ -1817,6 +1817,7 @@ dependencies = [
  "env_logger",
  "futures",
  "log",
+ "rand",
  "snmalloc-rs",
  "tokio",
  "url",

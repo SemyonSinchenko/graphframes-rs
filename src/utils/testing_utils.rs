@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::io::Result as ioResult;
 use std::{env, fs};
 
-// Gets the basepath of the dataset based on if it's benchmark runs or test runs
 /// # Arguments
 ///
 /// * `benchmark_run`: true for benchmark runs to read data from bench/data dir, false for tests to read data from testing/data.
@@ -85,6 +84,7 @@ pub async fn create_ldbc_test_graph(
 }
 
 // Reads the ldbc dataset properties file and converts it into a HashMap
+#[allow(dead_code)]
 pub fn parse_ldbc_properties_file(
     dataset: &str,
     benchmark_run: bool,

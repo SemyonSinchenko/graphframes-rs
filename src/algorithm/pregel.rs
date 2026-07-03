@@ -468,6 +468,10 @@ impl PregelBuilder {
             current_vertices = state_checkpointer
                 .push(ctx, &format!("state-{}", iteration), new_vertices, None)
                 .await?;
+
+            // remove the old checkpoint
+            state_checkpointer.evict(ctx, 1).await?;
+
             if self.use_vertex_voting {
                 let active_count = current_vertices
                     .clone()

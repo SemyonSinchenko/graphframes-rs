@@ -76,6 +76,8 @@ async fn main() -> Result<()> {
     let graph = GraphFrame::try_new(vertices, edges)?;
 
     if algorithm == "pagerank" {
+        // PageRank via Pregel. Algorithm-specifi parameter
+        // is convergence tolerance.
         let tol = params.parse::<f64>().unwrap();
         let pr = graph
             .pagerank()
@@ -92,6 +94,26 @@ async fn main() -> Result<()> {
             .await?;
 
         println!("num-iterations: {}", pr);
+    } else if algorithm == "wcc" {
+        // Weakly connected components via randomized contraction. The only
+        // algorithm-specific parameter is the random seed (used to seed the
+        // per-iteration affine hashes).
+        let seed: u64 = params
+            .parse()
+            .map_err(|e| DataFusionError::Execution(format!("invalid random seed: {e}")))?;
+        let cc = graph
+            .connected_components()
+            .set_checkpoint_dir(Path::from(
+                std::env::current_dir()?
+                    .join("gf_checkpoints")
+                    .to_string_lossy()
+                    .as_ref(),
+            ))
+            .set_seed(seed)
+            .run(&ctx, out, false)
+            .await?;
+
+        println!("num-iterations: {}", cc);
     };
 
     Ok(())
