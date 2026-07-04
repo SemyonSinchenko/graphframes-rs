@@ -85,7 +85,7 @@ impl ParquetCheckpointer {
         let dir = self.base.clone().join(postfix);
         let uri = format!("{}{}/", self.store_url.as_str(), dir);
 
-        let options = match sort_by {
+        let options = match sort_by.clone() {
             None => DataFrameWriteOptions::new(),
             Some(col_name) => DataFrameWriteOptions::new().with_sort_by(vec![SortExpr::new(
                 col(col_name),
@@ -110,7 +110,12 @@ impl ParquetCheckpointer {
         // so I'm not going to fix it right now.
         if wrote_any {
             self.stored.push_back(dir);
-            ctx.read_parquet(&uri, ParquetReadOptions::default()).await
+            let options = match sort_by.clone() {
+                None => ParquetReadOptions::default(),
+                Some(col_name) => ParquetReadOptions::new()
+                    .file_sort_order(vec![vec![SortExpr::new(col(col_name), false, false)]]),
+            };
+            ctx.read_parquet(&uri, options).await
         } else {
             Ok(df.clone())
         }
@@ -125,6 +130,14 @@ impl ParquetCheckpointer {
             store.delete_stream(paths).try_collect::<Vec<_>>().await?;
         }
         Ok(())
+    }
+
+    pub(crate) async fn evict_all_but_latest_n(
+        &mut self,
+        ctx: &SessionContext,
+        n: usize,
+    ) -> Result<()> {
+        self.evict(ctx, self.stored.len().saturating_sub(n)).await
     }
 
     pub(crate) async fn remove_last(&mut self, ctx: &SessionContext, n: usize) -> Result<()> {
