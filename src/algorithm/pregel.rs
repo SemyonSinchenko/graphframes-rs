@@ -353,6 +353,7 @@ impl PregelBuilder {
             self.checkpoint_config.store_url.clone(),
             self.checkpoint_config.dir.clone().join(run_id.clone()),
         );
+
         let edges_struct = edges_checkpointer
             .push(
                 ctx,
@@ -446,11 +447,19 @@ impl PregelBuilder {
                     "generated messages_df is None".to_string(),
                 ))??;
 
-            let aggregated_messages = if !self.aggregate_exprs.clone().is_empty() {
-                messages_df.aggregate(vec![col(VERTEX_ID)], self.aggregate_exprs.clone())?
-            } else {
-                messages_df
-            };
+            // spill aggregated to disk to reduce memory peak
+            let aggregated_messages = state_checkpointer
+                .push(
+                    &ctx,
+                    &format!("aggregated-messages-{}", iteration),
+                    if !self.aggregate_exprs.clone().is_empty() {
+                        messages_df.aggregate(vec![col(VERTEX_ID)], self.aggregate_exprs.clone())?
+                    } else {
+                        messages_df
+                    },
+                    None,
+                )
+                .await?;
 
             let vertices_with_messages = current_vertices
                 .clone()
@@ -469,8 +478,8 @@ impl PregelBuilder {
                 .push(ctx, &format!("state-{}", iteration), new_vertices, None)
                 .await?;
 
-            // remove the old checkpoint
-            state_checkpointer.evict(ctx, 1).await?;
+            // remove the old checkpoints
+            state_checkpointer.evict_all_but_latest_n(ctx, 1).await?;
 
             if self.use_vertex_voting {
                 let active_count = current_vertices
@@ -747,17 +756,19 @@ mod tests {
         let result = ctx
             .read_parquet(&output_uri, ParquetReadOptions::default())
             .await?;
-        let values = result.select(vec![col("value")])?.collect().await?;
+        let mut values = Vec::<i64>::new();
 
-        assert_eq!(
-            values[0]
-                .column(0)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap()
-                .values(),
-            &[0, 0]
-        );
+        for buf in result.select(vec![col("value")])?.collect().await? {
+            values.extend_from_slice(
+                buf.column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .values(),
+            )
+        }
+
+        assert_eq!(values, &[0, 0]);
         Ok(())
     }
 

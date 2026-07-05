@@ -14,6 +14,7 @@
 
 use crate::expressions::{axpb, finite_axpb};
 use crate::memory::{CheckpointConfig, ParquetCheckpointer};
+use crate::utils::{GraphFramesConfig, scoped_ctx};
 use crate::{EDGE_DST, EDGE_SRC, GraphFrame, VERTEX_ID};
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::error::Result;
@@ -199,6 +200,16 @@ impl<'a> ConnectedComponentsBuilder<'a> {
         output: &str,
         _include_debug_columns: bool,
     ) -> Result<usize> {
+        let gf_config = ctx
+            .state()
+            .config()
+            .options()
+            .extensions
+            .get::<GraphFramesConfig>()
+            .cloned()
+            .unwrap_or_default();
+
+        let ctx = &scoped_ctx(ctx, gf_config.prefer_smj);
         self.checkpoint_config.validate_output(output)?;
 
         let vertices = self
@@ -213,9 +224,9 @@ impl<'a> ConnectedComponentsBuilder<'a> {
             .select_columns(&vec![EDGE_SRC, EDGE_DST])?;
 
         // ---- prepare: drop self-loops, symmetrize, deduplicate ----
-        let prepared_edges = prepare_edges(&original_edges)?;
-
         let run_id = Uuid::new_v4().to_string();
+        log::info!("start WCC with run-id {run_id}");
+        let prepared_edges = prepare_edges(&original_edges)?;
 
         let ckpt_base = self.checkpoint_config.dir.clone().join(run_id.clone());
         let store_url = self.checkpoint_config.store_url.clone();
@@ -237,7 +248,7 @@ impl<'a> ConnectedComponentsBuilder<'a> {
             .push(ctx, "initial", prepared_edges, None)
             .await?;
         let mut graph_size = edges.clone().count().await?;
-        log::info!("start WCC with run-id {run_id} on {graph_size} edges");
+        log::info!("after preparation graph has {graph_size} edges");
 
         // ---- forward pass: iterative randomized contraction ----
         let mut rng = StdRng::seed_from_u64(self.random_seed);
