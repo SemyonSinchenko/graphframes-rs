@@ -1,7 +1,9 @@
+mod graph_utils;
 mod options;
 #[cfg(test)]
 mod testing_utils;
 
+pub(crate) use graph_utils::symmetrize;
 pub use options::GraphFramesConfig;
 pub(crate) use options::scoped_ctx;
 
