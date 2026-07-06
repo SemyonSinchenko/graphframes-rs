@@ -1,4 +1,5 @@
 use crate::GraphFrame;
+use datafusion::arrow::array::Int64Array;
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::error::Result;
 use datafusion::prelude::{CsvReadOptions, DataFrame, SessionContext};
@@ -109,6 +110,22 @@ pub fn parse_ldbc_properties_file(
         }
     }
     Ok(properties_map)
+}
+
+pub(crate) async fn collect_to_i64(data: &DataFrame, pos: usize) -> Result<Vec<i64>> {
+    let collected = data.clone().collect().await?;
+    let mut out: Vec<i64> = Vec::new();
+    for buf in collected.iter() {
+        out.extend_from_slice(
+            buf.column(pos)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values(),
+        )
+    }
+
+    Ok(out)
 }
 
 pub(crate) async fn assert_dataframes_equal(a: DataFrame, b: DataFrame) -> Result<()> {

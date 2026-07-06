@@ -535,8 +535,10 @@ impl GraphFrame {
 
 #[cfg(test)]
 mod tests {
+    use crate::utils::collect_to_i64;
+
     use super::*;
-    use datafusion::arrow::array::{Array, Int32Array, Int64Array};
+    use datafusion::arrow::datatypes::DataType;
     use datafusion::functions_aggregate::min_max::max;
     use datafusion::functions_aggregate::sum::sum;
     use std::fs;
@@ -639,7 +641,11 @@ mod tests {
             .pregel()
             .max_iterations(1)
             .set_checkpoint_dir(checkpoint_dir)
-            .add_vertex_column("in_degree", lit(0), col("in_degree") + pregel_default_msg())
+            .add_vertex_column(
+                "in_degree",
+                lit(0),
+                col("in_degree") + coalesce(vec![pregel_default_msg(), lit(0)]),
+            )
             .add_message(lit(1), MessageDirection::SrcToDst)
             .add_aggregate_expr(sum(pregel_default_msg()))
             .skip_dest_state()
@@ -651,19 +657,11 @@ mod tests {
             .await?;
         let counts = result
             .select(vec![col("id"), col("in_degree")])?
-            .sort(vec![col("id").sort(true, false)])?
-            .collect()
-            .await?;
+            .sort_by(vec![col("id")])?;
 
-        assert_eq!(
-            counts[0]
-                .column(1)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap()
-                .values(),
-            &[0, 1, 2]
-        );
+        let values = collect_to_i64(&counts, 1).await?;
+
+        assert_eq!(values, &[0, 1, 2]);
         Ok(())
     }
 
@@ -690,19 +688,11 @@ mod tests {
             .await?;
         let counts = result
             .select(vec![col("id"), col("out_degree")])?
-            .sort(vec![col("id").sort(true, false)])?
-            .collect()
-            .await?;
+            .sort_by(vec![col("id")])?;
 
-        assert_eq!(
-            counts[0]
-                .column(1)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap()
-                .values(),
-            &[2, 1, 0]
-        );
+        let values = collect_to_i64(&counts, 1).await?;
+
+        assert_eq!(values, &[2, 1, 0]);
         Ok(())
     }
 
@@ -724,17 +714,10 @@ mod tests {
         let result = ctx
             .read_parquet(&output_uri, ParquetReadOptions::default())
             .await?;
-        let counts = result.select(vec![col("loop")])?.collect().await?;
+        let counts = result.select(vec![col("loop")])?;
+        let values = collect_to_i64(&counts, 0).await?;
 
-        assert_eq!(
-            counts[0]
-                .column(0)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap()
-                .values(),
-            &[1]
-        );
+        assert_eq!(values, &[1]);
         Ok(())
     }
 
@@ -756,17 +739,7 @@ mod tests {
         let result = ctx
             .read_parquet(&output_uri, ParquetReadOptions::default())
             .await?;
-        let mut values = Vec::<i64>::new();
-
-        for buf in result.select(vec![col("value")])?.collect().await? {
-            values.extend_from_slice(
-                buf.column(0)
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
-                    .values(),
-            )
-        }
+        let values = collect_to_i64(&result, 0).await?;
 
         assert_eq!(values, &[0, 0]);
         Ok(())
@@ -801,21 +774,8 @@ mod tests {
         let result = ctx
             .read_parquet(&output_uri, ParquetReadOptions::default())
             .await?;
-        let values = result.select(vec![col("value")])?.collect().await?;
-
-        let mut values_vec: Vec<i32> = Vec::new();
-        for batch in values.iter() {
-            values_vec.append(
-                &mut batch
-                    .column(0)
-                    .clone()
-                    .as_any()
-                    .downcast_ref::<Int32Array>()
-                    .unwrap()
-                    .values()
-                    .to_vec(),
-            );
-        }
+        let values = result.select(vec![cast(col("value"), DataType::Int64)])?;
+        let values_vec = collect_to_i64(&values, 0).await?;
 
         // All vertices should have value 1
         assert!(values_vec.iter().all(|&x| x == 1));
@@ -850,21 +810,8 @@ mod tests {
         let result = ctx
             .read_parquet(&output_uri, ParquetReadOptions::default())
             .await?;
-        let values = result.select(vec![col("value")])?.collect().await?;
-
-        let mut values_vec: Vec<i32> = Vec::new();
-        for batch in values.iter() {
-            values_vec.append(
-                &mut batch
-                    .column(0)
-                    .clone()
-                    .as_any()
-                    .downcast_ref::<Int32Array>()
-                    .unwrap()
-                    .values()
-                    .to_vec(),
-            );
-        }
+        let values = result.select(vec![cast(col("value"), DataType::Int64)])?;
+        let values_vec = collect_to_i64(&values, 0).await?;
 
         // All vertices should have value 1
         assert!(values_vec.iter().all(|&x| x == 1));
@@ -901,19 +848,11 @@ mod tests {
             .await?;
         let counts = result
             .select(vec![col("id"), col("va")])?
-            .sort(vec![col("id").sort(true, false)])?
-            .collect()
-            .await?;
+            .sort(vec![col("id").sort(true, false)])?;
 
-        assert_eq!(
-            counts[0]
-                .column(1)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap()
-                .values(),
-            &[0, 1, 1] // vertex 1 has no incoming edges → NULL → 0; vertices 2,3 get only msg "a" = 1
-        );
+        let values = collect_to_i64(&counts, 1).await?;
+
+        assert_eq!(values, &[0, 1, 1]);
         Ok(())
     }
 
@@ -945,22 +884,12 @@ mod tests {
             .await?;
         let counts = result
             .select(vec![col("id"), col("va"), col("vb")])?
-            .sort(vec![col("id").sort(true, false)])?
-            .collect()
+            .sort_by(vec![col("id")])?
+            .cache()
             .await?;
 
-        let va = counts[0]
-            .column(1)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap()
-            .values();
-        let vb = counts[0]
-            .column(2)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap()
-            .values();
+        let va = collect_to_i64(&counts, 1).await?;
+        let vb = collect_to_i64(&counts, 2).await?;
 
         assert_eq!(va, &[0, 1, 1]); // sum of msg "a"
         assert_eq!(vb, &[0, 10, 10]); // max of msg "b"
@@ -991,26 +920,15 @@ mod tests {
             .add_vertex_column("value", lit(0), col("value") + pregel_default_msg())
             .add_message(lit(1), MessageDirection::Bidirectional)
             .add_aggregate_expr(sum(pregel_default_msg()))
+            .skip_dest_state()
             .run(&ctx, &output_uri, false)
             .await?;
 
         let result = ctx
             .read_parquet(&output_uri, ParquetReadOptions::default())
             .await?;
-        let values = result.select(vec![col("value")])?.collect().await?;
-
-        let mut values_vec: Vec<i64> = Vec::new();
-        for batch in values.iter() {
-            values_vec.append(
-                &mut batch
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
-                    .values()
-                    .to_vec(),
-            );
-        }
+        let values = result.select(vec![col("value")])?;
+        let values_vec = collect_to_i64(&values, 0).await?;
 
         assert!(values_vec.iter().all(|&x| x == 160));
         Ok(())
