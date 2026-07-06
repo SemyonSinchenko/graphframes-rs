@@ -835,7 +835,11 @@ mod tests {
             .pregel()
             .max_iterations(1)
             .set_checkpoint_dir(checkpoint_dir)
-            .add_vertex_column("va", lit(0i64), col("va") + pregel_default_msg())
+            .add_vertex_column(
+                "va",
+                lit(0i64),
+                col("va") + coalesce(vec![pregel_default_msg(), lit(0)]),
+            )
             .add_named_message("a", lit(1i64), MessageDirection::SrcToDst)
             .add_named_message("b", lit(10i64), MessageDirection::SrcToDst)
             .add_aggregate_expr(sum(pregel_msg("a")))
@@ -847,8 +851,8 @@ mod tests {
             .read_parquet(&output_uri, ParquetReadOptions::default())
             .await?;
         let counts = result
-            .select(vec![col("id"), col("va")])?
-            .sort(vec![col("id").sort(true, false)])?;
+            .sort(vec![col("id").sort(true, false)])?
+            .select(vec![col("va")])?;
 
         let values = collect_to_i64(&counts, 1).await?;
 
