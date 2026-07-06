@@ -873,8 +873,16 @@ mod tests {
             .pregel()
             .max_iterations(1)
             .set_checkpoint_dir(checkpoint_dir)
-            .add_vertex_column("va", lit(0i64), col("va") + pregel_msg("a"))
-            .add_vertex_column("vb", lit(0i64), col("vb") + pregel_msg("b"))
+            .add_vertex_column(
+                "va",
+                lit(0i64),
+                col("va") + coalesce(vec![pregel_msg("a"), lit(0)]),
+            )
+            .add_vertex_column(
+                "vb",
+                lit(0i64),
+                col("vb") + coalesce(vec![pregel_msg("b"), lit(0)]),
+            )
             .add_named_message("a", lit(1i64), MessageDirection::SrcToDst)
             .add_named_message("b", lit(10i64), MessageDirection::SrcToDst)
             .add_named_aggregate_expr("a", sum(pregel_msg("a")))
