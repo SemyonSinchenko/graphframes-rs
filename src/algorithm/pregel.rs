@@ -854,7 +854,7 @@ mod tests {
             .sort(vec![col("id").sort(true, false)])?
             .select(vec![col("va")])?;
 
-        let values = collect_to_i64(&counts, 1).await?;
+        let values = collect_to_i64(&counts, 0).await?;
 
         assert_eq!(values, &[0, 1, 1]);
         Ok(())
@@ -895,13 +895,13 @@ mod tests {
             .read_parquet(&output_uri, ParquetReadOptions::default())
             .await?;
         let counts = result
-            .select(vec![col("id"), col("va"), col("vb")])?
             .sort_by(vec![col("id")])?
+            .select(vec![col("va"), col("vb")])?
             .cache()
             .await?;
 
-        let va = collect_to_i64(&counts, 1).await?;
-        let vb = collect_to_i64(&counts, 2).await?;
+        let va = collect_to_i64(&counts, 0).await?;
+        let vb = collect_to_i64(&counts, 1).await?;
 
         assert_eq!(va, &[0, 1, 1]); // sum of msg "a"
         assert_eq!(vb, &[0, 10, 10]); // max of msg "b"
