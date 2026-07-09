@@ -8,6 +8,7 @@
 //!
 //! https://arxiv.org/abs/1506.05093
 
+use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::error::Result;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::functions_aggregate;
@@ -131,31 +132,24 @@ impl<'a> MISBuilder<'a> {
         let mut converged = false;
 
         while !converged {
-            // we must contract edges here
-            // but on the first iteration there is no actualy contraction
-            // so we skipt it;
-            edges = {
-                let inner = edges.clone().join(
-                    vertices_left.clone(),
-                    JoinType::Inner,
-                    &[EDGE_DST],
-                    &[VERTEX_ID],
+            // edges with effective degrees;
+            // used multiple times,we should keep it.
+            let edges_aug = edges_ckptr
+                .push(
+                    &ctx,
+                    &format!("aug_{}", iteration),
+                    edges.clone().join(
+                        vertices_left.clone(),
+                        JoinType::Inner,
+                        &[EDGE_DST],
+                        &[VERTEX_ID],
+                        None,
+                    )?,
                     None,
-                )?;
-                if iteration == 0 {
-                    inner
-                } else {
-                    // after the first iteration an amount of vertices is much less than initial
-                    // it should make sense to update edges to increase the perf
-                    let inner_e = edges_ckptr
-                        .push(&ctx, &iteration.to_string(), inner, None)
-                        .await?;
-                    edges_ckptr.evict_all_but_latest_n(&ctx, 1).await?;
-                    inner_e
-                }
-            };
+                )
+                .await?;
 
-            let effective_degrees = edges.clone().aggregate(
+            let effective_degrees = edges_aug.clone().aggregate(
                 vec![col(EDGE_SRC)],
                 vec![functions_aggregate::sum::sum(col(PROB_COL)).alias(DEG_COL)],
             )?;
@@ -173,6 +167,11 @@ impl<'a> MISBuilder<'a> {
                             &[EDGE_SRC],
                             None,
                         )?
+                        // in the source paper:
+                        // nomination is done using p_t
+                        // so we must nomitate using p_t
+                        // and only after that compute p_{t+1}
+                        .with_column(IS_NOMINATED, random().lt_eq(col(PROB_COL)))?
                         .with_column(
                             PROB_COL,
                             when(col(DEG_COL).gt_eq(lit(2.0)), col(PROB_COL).div(lit(2.0)))
@@ -182,7 +181,6 @@ impl<'a> MISBuilder<'a> {
                                 )
                                 .otherwise(lit(0.5))?,
                         )?
-                        .with_column(IS_NOMINATED, random().lt_eq(col(PROB_COL)))?
                         .select(vec![col(VERTEX_ID), col(PROB_COL), col(IS_NOMINATED)])?,
                     None,
                 )
@@ -201,7 +199,7 @@ impl<'a> MISBuilder<'a> {
 
             // if v is marked but no nbrs of v are marked v is joining MIS
             // and is removed along with all it's neighbors
-            let joined_mis_nbrs_cond = edges
+            let joined_mis_nbrs_cond = edges_aug
                 .clone()
                 .join(
                     probs_to_join_mis.clone(),
@@ -255,7 +253,7 @@ impl<'a> MISBuilder<'a> {
                 .push(&ctx, &format!("mis_{}", iteration), updated_mis, None)
                 .await?;
 
-            let neighbors_of_mis = edges
+            let neighbors_of_mis = edges_aug
                 .clone()
                 .join(
                     joined_mis.clone(),
@@ -272,14 +270,14 @@ impl<'a> MISBuilder<'a> {
                     &format!("vertices-{}", iteration),
                     probs_to_join_mis
                         .join(
-                            joined_mis,
+                            joined_mis.clone(),
                             JoinType::LeftAnti,
                             &[VERTEX_ID],
                             &[VERTEX_ID],
                             None,
                         )?
                         .join(
-                            neighbors_of_mis,
+                            neighbors_of_mis.clone(),
                             JoinType::LeftAnti,
                             &[VERTEX_ID],
                             &[VERTEX_ID],
@@ -290,11 +288,52 @@ impl<'a> MISBuilder<'a> {
                 .await?;
 
             let cnt_v_left = vertices_left.clone().count().await?;
-            log::info!("iteration {iteration} done, {cnt_v_left} are participating");
+
+            // contract edges
+            let removed = joined_mis
+                .clone()
+                .select_columns(&vec![VERTEX_ID])?
+                .union(neighbors_of_mis.clone().select_columns(&vec![VERTEX_ID])?)?;
+            edges = edges_ckptr
+                .push(
+                    &ctx,
+                    &format!("conctracted_{}", iteration),
+                    edges
+                        .clone()
+                        .join(
+                            removed.clone(),
+                            JoinType::LeftAnti,
+                            &[EDGE_SRC],
+                            &[VERTEX_ID],
+                            None,
+                        )?
+                        .join(removed, JoinType::LeftAnti, &[EDGE_DST], &[VERTEX_ID], None)?,
+                    None,
+                )
+                .await?;
+
+            let cnt_e_left = edges.clone().count().await?;
+            log::info!(
+                "iteration {iteration} done, {cnt_v_left} vertices, {cnt_e_left} edges left in the graph"
+            );
+
+            vertex_ckptr.evict_all_but_latest_n(&ctx, 1).await?;
+            edges_ckptr.evict_all_but_latest_n(&ctx, 1).await?;
 
             converged = cnt_v_left == 0;
             iteration += 1;
         }
+
+        log::info!("MIS converged after {iteration} iterations.");
+
+        current_mis
+            .filter(col("mis"))?
+            .select_columns(&[VERTEX_ID])?
+            .write_parquet(output, DataFrameWriteOptions::new(), None)
+            .await?;
+
+        vertex_ckptr.purge(&ctx).await?;
+        edges_ckptr.purge(&ctx).await?;
 
         Ok(iteration)
     }
