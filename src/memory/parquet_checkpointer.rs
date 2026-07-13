@@ -89,8 +89,8 @@ impl ParquetCheckpointer {
             None => DataFrameWriteOptions::new(),
             Some(col_name) => DataFrameWriteOptions::new().with_sort_by(vec![SortExpr::new(
                 col(col_name),
-                false,
-                false,
+                true,
+                true,
             )]),
         };
 
@@ -113,7 +113,7 @@ impl ParquetCheckpointer {
             let options = match sort_by.clone() {
                 None => ParquetReadOptions::default(),
                 Some(col_name) => ParquetReadOptions::new()
-                    .file_sort_order(vec![vec![SortExpr::new(col(col_name), false, false)]]),
+                    .file_sort_order(vec![vec![SortExpr::new(col(col_name), true, true)]]),
             };
             ctx.read_parquet(&uri, options).await
         } else {
