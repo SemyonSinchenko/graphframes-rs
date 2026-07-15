@@ -50,17 +50,17 @@ async fn main() -> Result<()> {
         .parse()
         .map_err(|e| DataFusionError::Execution(format!("invalid number of partitions: {e}")))?;
     let max_temp_size = if args.len() == 9 {
-	let temp_limit = &args[8];
-	parse_mem(temp_limit)?
+        let temp_limit = &args[8];
+        parse_mem(temp_limit)?
     } else {
-	parse_mem("100G")?
+        parse_mem("100G")?
     };
 
     let max_pool_mem = parse_mem(max_memory)?;
     let env = RuntimeEnvBuilder::new()
         .with_memory_pool(Arc::new(FairSpillPool::new(max_pool_mem)))
         .with_temp_file_path(std::env::current_dir()?.join("gf_df_tmp"))
-	.with_max_temp_directory_size(max_temp_size as u64)
+        .with_max_temp_directory_size(max_temp_size as u64)
         .build_arc()?;
     let session_state = SessionStateBuilder::new()
         .with_config(SessionConfig::new().with_target_partitions(num_partition))
