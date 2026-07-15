@@ -14,7 +14,7 @@
 
 use crate::expressions::{axpb, finite_axpb};
 use crate::memory::{CheckpointConfig, ParquetCheckpointer};
-use crate::utils::{GraphFramesConfig, scoped_ctx};
+use crate::utils::{GraphFramesConfig, scoped_ctx, symmetrize};
 use crate::{EDGE_DST, EDGE_SRC, GraphFrame, VERTEX_ID};
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::error::Result;
@@ -38,18 +38,6 @@ const CC_FR_V: &str = "__cc_fr_v";
 const CC_FR_REP: &str = "__cc_fr_rep";
 const CC_COMP_KEY: &str = "__cc_comp_key";
 const CC_NEW_COMPONENT: &str = "__cc_new_component";
-
-/// Prepares the edge set for contraction: drops self-loops, symmetrizes
-/// (adds the reverse of every edge), and deduplicates. The result is the
-/// undirected simple graph the algorithm operates on.
-fn prepare_edges(edges: &DataFrame) -> Result<DataFrame> {
-    let no_loops = edges.clone().filter(col(EDGE_SRC).not_eq(col(EDGE_DST)))?;
-    let reversed = no_loops.clone().select(vec![
-        col(EDGE_DST).alias(EDGE_SRC),
-        col(EDGE_SRC).alias(EDGE_DST),
-    ])?;
-    no_loops.union(reversed)?.distinct()
-}
 
 /// Computes the per-iteration component representatives for every source
 /// vertex under the affine hash `(rA, rB)`:
@@ -226,7 +214,14 @@ impl<'a> ConnectedComponentsBuilder<'a> {
         // ---- prepare: drop self-loops, symmetrize, deduplicate ----
         let run_id = Uuid::new_v4().to_string();
         log::info!("start WCC with run-id {run_id}");
-        let prepared_edges = prepare_edges(&original_edges)?;
+        // it may look conter-intuitive
+        // but IRL distinct is more expensive here.
+        //
+        // With distinct: full-scan over huge edges, slightly less on the first iter;
+        // Without distinct: fast flow here, slightly slower on the first iter.
+        //
+        // TODO: benchmark it and see which one is better IRL, not in theory
+        let prepared_edges = symmetrize(&original_edges, false)?;
 
         let ckpt_base = self.checkpoint_config.dir.clone().join(run_id.clone());
         let store_url = self.checkpoint_config.store_url.clone();

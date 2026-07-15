@@ -11,4 +11,5 @@ An experimental single node out-of core graph algorithms.
 1. Low-level `Pregel API`: *Malewicz, Grzegorz, et al. "Pregel: a system for large-scale graph processing." Proceedings of the 2010 ACM SIGMOD International Conference on Management of data. 2010.*
    - Pregel-based PageRank: *Zadeh, R., et al. "Cme 323: Distributed algorithms and optimization, spring 2015." University Lecture (2015).*
    - Pregel-based Multi Source Shortest Paths: *Malewicz, Grzegorz, et al. "Pregel: a system for large-scale graph processing." Proceedings of the 2010 ACM SIGMOD International Conference on Management of data. 2010.*
-3. Weakly Connected Components: *Bögeholz, Harald, Michael Brand, and Radu-Alexandru Todor. "In-database connected component analysis." 2020 IEEE 36th International Conference on Data Engineering (ICDE). IEEE, 2020.*
+2. Weakly Connected Components: *Bögeholz, Harald, Michael Brand, and Radu-Alexandru Todor. "In-database connected component analysis." 2020 IEEE 36th International Conference on Data Engineering (ICDE). IEEE, 2020.*
+3. Maximal Independent Set: *Ghaffari, Mohsen. "An improved distributed algorithm for maximal independent set." Proceedings of the twenty-seventh annual ACM-SIAM symposium on Discrete algorithms. Society for Industrial and Applied Mathematics, 2016.*
