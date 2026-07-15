@@ -12,6 +12,11 @@ use futures::{StreamExt, TryStreamExt};
 /// Column name for pagerank in the Page Rank algorithm
 pub const PAGERANK: &str = "pagerank";
 
+/// Column name for the per-iteration pagerank delta used by the incremental
+/// (GraphX-style) PageRank. It is an internal state column and is not part of
+/// the final output.
+pub const PAGERANK_DELTA: &str = "pagerank_delta";
+
 /// A builder for the PageRank algorithm.
 ///
 #[derive(Debug, Clone)]
@@ -93,38 +98,70 @@ impl<'a> PageRankBuilder<'a> {
         let intermediate_dir = self.checkpoint_config.dir.clone().join("_pregel_raw");
         let intermediate_uri = format!("{}{}/", store_url.as_str(), intermediate_dir);
 
+        // Incremental (GraphX-style) PageRank.
+        //
+        // Each vertex carries two extra columns alongside `out_degree`:
+        //   * `pagerank` — accumulated rank, updated as  PR += alpha * msgSum
+        //   * `pagerank_delta` — the per-iteration change = alpha * msgSum (= newPR - oldPR)
+        //
+        // The message a source sends is its *delta* split over its out-edges
+        // (`delta / out_degree`), and only sources whose delta is still above `tol`
+        // participate — the `participates` column drives the source-side participation
+        // filter in the Pregel engine, so converged vertices stop emitting messages and
+        // later iterations become cheap.
+        //
+        // Because the result is normalized to sum to 1 at the end, the exact additive
+        // constant does not matter; we only need a non-zero initial delta to bootstrap.
+        // Seeding both columns with `reset_prob` also makes the first iteration
+        // numerically identical to the old full-recompute.
+        //
+        // `alpha` (the damping factor = 1 - reset_prob) is kept: it cannot be folded into
+        // normalization. Dropping it collapses the result to the pure random-walk
+        // stationary distribution, which is wrong whenever the graph has sinks.
+        let new_delta = lit(alpha) * coalesce(vec![pregel_default_msg(), lit(0.0)]);
+
         let pregel_builder = graph_with_degrees
             .pregel()
             .add_vertex_column(
                 PAGERANK,
-                lit(reset_prob_per_vertices), // All vertices start with a rank of 1/N
-                lit(reset_prob_per_vertices)
-                    + lit(alpha) * coalesce(vec![pregel_default_msg(), lit(0.0)]),
+                lit(reset_prob_per_vertices),
+                col(PAGERANK) + new_delta.clone(),
+            )
+            .add_vertex_column(
+                PAGERANK_DELTA,
+                lit(reset_prob_per_vertices),
+                new_delta.clone(),
             )
             .add_vertex_column("out_degree", col("out_degree"), col("out_degree"))
             .add_message(
-                pregel_src(PAGERANK) / pregel_src("out_degree"),
+                pregel_src(PAGERANK_DELTA) / pregel_src("out_degree"),
                 MessageDirection::SrcToDst,
             )
             .add_aggregate_expr(sum(pregel_default_msg()))
+            // A vertex participates while its (new) delta is still above `tol`. This is
+            // intentionally a separate column from the voting column: participation prunes
+            // message generation every iteration, while voting only decides when to stop.
+            .with_participation_column(
+                "participates",
+                lit(true),
+                new_delta.clone().gt(lit(self.tol)),
+            )
             .skip_dest_state()
             .with_checkpoint_store(store_url.clone())
             .set_checkpoint_dir(self.checkpoint_config.dir.join("inner_checkpoint"));
 
         let num_iterations = if self.max_iter > 0 {
+            // Fixed iteration budget: keep the participation filter (cheap tail) but do
+            // not vote for early termination.
             pregel_builder
                 .max_iterations(self.max_iter)
                 .run(ctx, &intermediate_uri, false)
                 .await?
         } else {
+            // Convergence mode: stop once no vertex is still active. The voting column
+            // is distinct from `participates`; both happen to equal `delta > tol` here.
             pregel_builder
-                .with_vertex_voting(
-                    "rank_changed",
-                    abs(col(PAGERANK)
-                        - (lit(reset_prob_per_vertices)
-                            + lit(alpha) * coalesce(vec![pregel_default_msg(), lit(0.0)])))
-                    .gt(lit(self.tol)),
-                )
+                .with_vertex_voting("active", new_delta.clone().gt(lit(self.tol)))
                 .run(ctx, &intermediate_uri, false)
                 .await?
         };
