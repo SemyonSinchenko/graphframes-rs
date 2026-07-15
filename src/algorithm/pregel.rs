@@ -380,12 +380,35 @@ impl PregelBuilder {
         // Main Pregel loop
         while iteration < max_iterations {
             iteration += 1;
-            let src_vertices =
-                current_vertices
-                    .clone()
-                    .select(current_vertices.schema().fields().iter().map(|field| {
-                        col(field.name()).alias(format!("{}_{}", PREGEL_MSG_SRC, field.name()))
-                    }))?;
+            // Build the source side of the triplets.
+            //
+            // When destination state is not needed (`skip_dest_state`) we can push the
+            // participation filter *before* the join: only participating sources ever
+            // emit a message, so dropping inactive sources up front shrinks the join
+            // input. This is the GraphX-style truncation — inactive sources send nothing.
+            //
+            // When destination state IS needed we must not pre-filter sources, because
+            // a triplet stays relevant as long as *either* endpoint participates; that
+            // OR semantics cannot be expressed by filtering each side independently, so
+            // we defer to the post-join filter below.
+            let src_projection: Vec<Expr> = current_vertices
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| {
+                    col(field.name()).alias(format!("{}_{}", PREGEL_MSG_SRC, field.name()))
+                })
+                .collect();
+
+            let src_vertices = if !self.use_dest_sate {
+                let mut src_state = current_vertices.clone();
+                if let Some(participation_column) = &self.participation_column {
+                    src_state = src_state.filter(col(&participation_column.name))?;
+                }
+                src_state.select(src_projection.clone())?
+            } else {
+                current_vertices.clone().select(src_projection)?
+            };
 
             let mut triplets = src_vertices.clone().join_on(
                 edges_struct.clone(),
@@ -404,20 +427,13 @@ impl PregelBuilder {
                     JoinType::Inner,
                     vec![pregel_dst(VERTEX_ID).eq(pregel_edge(EDGE_DST))],
                 )?;
-            }
-
-            // If participation_column is present, skip triplets where both src and dst
-            // are not participating in iteration.
-            if self.participation_column.is_some() {
-                let participation_column = self.participation_column.as_ref().unwrap();
-
-                if self.use_dest_sate {
+                // Drop triplets where *both* endpoints are inactive; keep a triplet as
+                // long as the source or the destination still participates.
+                if let Some(participation_column) = &self.participation_column {
                     triplets = triplets.filter(
                         pregel_src(&participation_column.name)
                             .or(pregel_dst(&participation_column.name)),
                     )?;
-                } else {
-                    triplets = triplets.filter(pregel_src(&participation_column.name))?;
                 }
             }
 
