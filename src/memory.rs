@@ -1,3 +1,4 @@
+mod hash_partitioned;
 mod parquet_checkpointer;
 
 pub use parquet_checkpointer::CheckpointConfig;

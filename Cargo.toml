@@ -10,6 +10,7 @@ exclude = [
 
 [dependencies]
 datafusion = "54"
+async-trait = "0.1"
 tokio = {version = "1", features = ["full"] }
 url = "2"
 futures = "0.3"

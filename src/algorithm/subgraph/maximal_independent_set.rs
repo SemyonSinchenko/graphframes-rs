@@ -143,7 +143,6 @@ impl<'a> MISBuilder<'a> {
                     col(VERTEX_ID).alias(MIS_V),
                     lit(false).alias(MIS_FLAG),
                 ])?,
-                None,
             )
             .await?;
 
@@ -157,7 +156,6 @@ impl<'a> MISBuilder<'a> {
                     col(VERTEX_ID).alias(MIS_V),
                     lit(0.5f64).alias(MIS_PROB),
                 ])?,
-                None,
             )
             .await?;
 
@@ -182,7 +180,6 @@ impl<'a> MISBuilder<'a> {
                         .select_columns(&[EDGE_SRC, EDGE_DST])?,
                     true,
                 )?,
-                None,
             )
             .await?;
 
@@ -210,7 +207,6 @@ impl<'a> MISBuilder<'a> {
                             vec![col(EDGE_SRC)],
                             vec![functions_aggregate::sum::sum(col(MIS_PROB)).alias(MIS_DEG)],
                         )?,
-                    None,
                 )
                 .await?;
 
@@ -243,7 +239,6 @@ impl<'a> MISBuilder<'a> {
                                 .otherwise(lit(0.5))?,
                         )?
                         .select(vec![col(MIS_V), col(MIS_PROB), col(MIS_NOM)])?,
-                    None,
                 )
                 .await?;
 
@@ -305,7 +300,6 @@ impl<'a> MISBuilder<'a> {
                     ctx,
                     &format!("mis_{}", iteration),
                     or_into_mis(current_mis.clone(), new_mis_members)?,
-                    None,
                 )
                 .await?;
 
@@ -325,7 +319,6 @@ impl<'a> MISBuilder<'a> {
                             None,
                         )?
                         .select(vec![col(MIS_V), col(MIS_PROB)])?,
-                    None,
                 )
                 .await?;
 
@@ -350,7 +343,6 @@ impl<'a> MISBuilder<'a> {
                             &[MIS_REM_V],
                             None,
                         )?,
-                    None,
                 )
                 .await?;
 
@@ -378,7 +370,6 @@ impl<'a> MISBuilder<'a> {
                             ctx,
                             &format!("mis_sweep_{}", iteration),
                             or_into_mis(current_mis.clone(), remaining)?,
-                            None,
                         )
                         .await?;
                 }
