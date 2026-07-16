@@ -239,9 +239,7 @@ impl<'a> ConnectedComponentsBuilder<'a> {
             ParquetCheckpointer::new(store_url.clone(), ckpt_base.clone().join("backward"));
 
         // Offload the initial edges; from here on `edges` is disk-backed.
-        let mut edges = edges_ckptr
-            .push(ctx, "initial", prepared_edges, None)
-            .await?;
+        let mut edges = edges_ckptr.push(ctx, "initial", prepared_edges).await?;
         let mut graph_size = edges.clone().count().await?;
         log::info!("after preparation graph has {graph_size} edges");
 
@@ -267,16 +265,14 @@ impl<'a> ConnectedComponentsBuilder<'a> {
             let cc_reps = compute_cc_reps(&edges, r_a, r_b)?;
             // Spill reps to the forward checkpointer; keep the lazy,
             // disk-backed frame for the back pass.
-            let cc_reps = fwd_ckptr
-                .push(ctx, &iteration.to_string(), cc_reps, None)
-                .await?;
+            let cc_reps = fwd_ckptr.push(ctx, &iteration.to_string(), cc_reps).await?;
             forward_reps.push(cc_reps.clone());
 
             // Relabel edges: src -> rep, then dst -> rep, drop self-loops.
             let new_edges = relabel_edges(&edges, &cc_reps)?;
 
             edges = edges_ckptr
-                .push(ctx, &iteration.to_string(), new_edges, None)
+                .push(ctx, &iteration.to_string(), new_edges)
                 .await?;
             // Count the new edge set BEFORE evicting the previous checkpoint.
             // When a contraction iteration empties the edge set (convergence),
@@ -299,7 +295,7 @@ impl<'a> ConnectedComponentsBuilder<'a> {
         } else {
             // Seed the back frontier with the last forward reps.
             let mut frontier = back_ckptr
-                .push(ctx, "seed", forward_reps[n - 1].clone(), None)
+                .push(ctx, "seed", forward_reps[n - 1].clone())
                 .await?;
             // The last forward reps are now consumed; drop them from disk.
             fwd_ckptr.remove_last(ctx, 1).await?;
@@ -318,7 +314,7 @@ impl<'a> ConnectedComponentsBuilder<'a> {
                 let older = forward_reps[t - 1].clone();
                 let composed = back_prop_step(&older, &frontier, acc_a, acc_b)?;
 
-                frontier = back_ckptr.push(ctx, &t.to_string(), composed, None).await?;
+                frontier = back_ckptr.push(ctx, &t.to_string(), composed).await?;
                 // Keep only the latest back checkpoint.
                 back_ckptr.evict(ctx, 1).await?;
                 // `older` (cc_reps_{t}) has been consumed into the new
@@ -362,7 +358,7 @@ impl<'a> ConnectedComponentsBuilder<'a> {
         // hashed representative (or the id itself for isolated vertices).
         let result = if self.use_labels_as_components {
             // spill "raw" components to disk
-            let components = fwd_ckptr.push(ctx, "final_df", final_df, None).await?;
+            let components = fwd_ckptr.push(ctx, "final_df", final_df).await?;
             // Relabel each component to the minimum original id of its members.
             let labels = components.clone().aggregate(
                 vec![col(COMPONENT_COL).alias(CC_COMP_KEY)],

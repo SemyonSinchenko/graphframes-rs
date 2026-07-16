@@ -2,9 +2,8 @@ use datafusion::common::plan_err;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::object_store::ObjectStoreUrl;
-use datafusion::logical_expr::SortExpr;
 use datafusion::object_store::path::Path;
-use datafusion::prelude::{DataFrame, ParquetReadOptions, SessionContext, col};
+use datafusion::prelude::{DataFrame, ParquetReadOptions, SessionContext};
 use futures::{StreamExt, TryStreamExt};
 use std::collections::VecDeque;
 use url::Url;
@@ -75,50 +74,60 @@ impl ParquetCheckpointer {
         }
     }
 
+    /// Write `df` to parquet and read it straight back. No sorting, no declared
+    /// partitioning -- use this when the SMJ savings don't justify the write-time
+    /// sort + repartition cost.
     pub(crate) async fn push(
         &mut self,
         ctx: &SessionContext,
         postfix: &str,
         df: DataFrame,
-        sort_by: Option<String>,
     ) -> Result<DataFrame> {
         let dir = self.base.clone().join(postfix);
         let uri = format!("{}{}/", self.store_url.as_str(), dir);
 
-        let options = match sort_by.clone() {
-            None => DataFrameWriteOptions::new(),
-            Some(col_name) => DataFrameWriteOptions::new().with_sort_by(vec![SortExpr::new(
-                col(col_name),
-                true,
-                true,
-            )]),
-        };
+        df.clone()
+            .write_parquet(&uri, DataFrameWriteOptions::new(), None)
+            .await?;
 
-        df.clone().write_parquet(&uri, options, None).await?;
-
-        // Empty dataframe is a valid case here,
-        // so we should check that there are files
-        // before an attempt to read back.
+        // Empty dataframe is a valid case; only register/read back if files exist.
         let store = ctx.runtime_env().object_store(&self.store_url)?;
         let wrote_any = store.list(Some(&dir)).next().await.is_some();
 
-        // This check is potentially dangereous:
-        // on slow remote object stores list-after-write
-        // may be empty and this may break the performance.
-        //
-        // It should not be a problem with modern implementations,
-        // so I'm not going to fix it right now.
         if wrote_any {
             self.stored.push_back(dir);
-            let options = match sort_by.clone() {
-                None => ParquetReadOptions::default(),
-                Some(col_name) => ParquetReadOptions::new()
-                    .file_sort_order(vec![vec![SortExpr::new(col(col_name), true, true)]]),
-            };
-            ctx.read_parquet(&uri, options).await
+            ctx.read_parquet(&uri, ParquetReadOptions::default()).await
         } else {
             Ok(df.clone())
         }
+    }
+
+    /// Write `df` already hash-partitioned by `key` into `target_partitions` files
+    /// (each sorted by `key`) and read it back declaring `Partitioning::Hash([key], N)`
+    /// + sortedness, so a downstream `SortMergeJoin` on `key` skips BOTH the
+    /// per-partition sort and the hash repartition.
+    ///
+    /// The session's `target_partitions` must stay equal to this `N` for the
+    /// lifetime of the returned `DataFrame`, otherwise the optimizer inserts a
+    /// repartition to raise/lower parallelism.
+    pub(crate) async fn push_pre_sorted(
+        &mut self,
+        ctx: &SessionContext,
+        postfix: &str,
+        df: DataFrame,
+        key: &str,
+    ) -> Result<DataFrame> {
+        let dir = self.base.clone().join(postfix);
+        let uri = format!("{}{}/", self.store_url.as_str(), dir);
+        let num_partitions = ctx.state().config().target_partitions();
+
+        super::hash_partitioned::write_batches(&df, key, ctx, &uri).await?;
+
+        self.stored.push_back(dir);
+        let table =
+            super::hash_partitioned::HashPartitionedTable::try_new(ctx, &uri, key, num_partitions)
+                .await?;
+        table.read_dataframe(ctx).await
     }
 
     pub(crate) async fn evict(&mut self, ctx: &SessionContext, n: usize) -> Result<()> {
@@ -160,10 +169,14 @@ impl ParquetCheckpointer {
 mod tests {
     use super::*;
     use crate::utils::assert_dataframes_equal;
+    use datafusion::arrow::array::{Int64Array, RecordBatch};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::physical_plan::displayable;
     use datafusion::prelude::*;
     use std::fs;
     use std::path::PathBuf;
     use std::process::id;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use url::Url;
 
@@ -238,7 +251,7 @@ mod tests {
         let base = _guard.0.clone();
 
         let original = dummy_df(&ctx)?;
-        let restored = ckptr.push(&ctx, "c1", original.clone(), None).await?;
+        let restored = ckptr.push(&ctx, "c1", original.clone()).await?;
 
         assert_dataframes_equal(original, restored).await?;
         assert!(
@@ -255,7 +268,7 @@ mod tests {
 
         for postfix in ["c1", "c2", "c3"] {
             let df = dummy_df(&ctx)?;
-            ckptr.push(&ctx, postfix, df, None).await?;
+            ckptr.push(&ctx, postfix, df).await?;
         }
 
         for postfix in ["c1", "c2", "c3"] {
@@ -274,7 +287,7 @@ mod tests {
 
         for postfix in ["c1", "c2", "c3"] {
             let df = dummy_df(&ctx)?;
-            ckptr.push(&ctx, postfix, df, None).await?;
+            ckptr.push(&ctx, postfix, df).await?;
         }
 
         ckptr.evict(&ctx, 1).await?;
@@ -301,7 +314,7 @@ mod tests {
 
         for postfix in ["c1", "c2"] {
             let df = dummy_df(&ctx)?;
-            ckptr.push(&ctx, postfix, df, None).await?;
+            ckptr.push(&ctx, postfix, df).await?;
         }
 
         // Requesting 10 evictions with only 2 stored must not panic and should remove all.
@@ -327,7 +340,7 @@ mod tests {
 
         for postfix in ["c1", "c2", "c3"] {
             let df = dummy_df(&ctx)?;
-            ckptr.push(&ctx, postfix, df, None).await?;
+            ckptr.push(&ctx, postfix, df).await?;
         }
 
         ckptr.purge(&ctx).await?;
@@ -354,9 +367,9 @@ mod tests {
         let base = _guard.0.clone();
 
         let df = dummy_df(&ctx)?;
-        ckptr.push(&ctx, "c1", df, None).await?;
+        ckptr.push(&ctx, "c1", df).await?;
         let df = dummy_df(&ctx)?;
-        ckptr.push(&ctx, "c2", df, None).await?;
+        ckptr.push(&ctx, "c2", df).await?;
 
         ckptr.evict(&ctx, 1).await?;
         assert!(!ckpt_data_present(&base, "c1"));
@@ -364,7 +377,7 @@ mod tests {
 
         // Pushing after a partial evict must still work and yield a usable DataFrame.
         let original = dummy_df(&ctx)?;
-        let restored = ckptr.push(&ctx, "c3", original.clone(), None).await?;
+        let restored = ckptr.push(&ctx, "c3", original.clone()).await?;
         assert_dataframes_equal(original, restored).await?;
         assert!(ckpt_data_present(&base, "c3"));
 
@@ -373,6 +386,82 @@ mod tests {
         ckptr.purge(&ctx).await?;
         assert!(!ckpt_data_present(&base, "c2"));
         assert!(!ckpt_data_present(&base, "c3"));
+        Ok(())
+    }
+
+    /// Build a small `(key_col, "v")` Int64 DataFrame bound to `ctx`, so the writer
+    /// plans/reads on the same `target_partitions` as the test context.
+    async fn keyed_df(
+        ctx: &SessionContext,
+        key_col: &str,
+        val_col: &str,
+        keys: &[i64],
+        vals: &[i64],
+    ) -> DataFrame {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(key_col, DataType::Int64, false),
+            Field::new(val_col, DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(keys.to_vec())),
+                Arc::new(Int64Array::from(vals.to_vec())),
+            ],
+        )
+        .expect("build batch");
+        ctx.read_batch(batch).expect("read_batch")
+    }
+
+    /// Two tables written via [`ParquetCheckpointer::push_pre_sorted`] and joined on their
+    /// co-partitioned keys must feed a `SortMergeJoin` with NEITHER a `SortExec` NOR a
+    /// `RepartitionExec` above the inputs.
+    #[tokio::test]
+    async fn test_push_pre_sorted_join_skips_sort_and_repartition() -> Result<()> {
+        let n = 4;
+        let dir = unique_temp_dir("presort_smj");
+        let store_url = ObjectStoreUrl::parse("file://")?;
+        let base = Path::from_filesystem_path(&dir).expect("temp dir -> object_store path");
+        let ctx = SessionContext::new_with_config(
+            SessionConfig::new()
+                .with_target_partitions(n)
+                .set_bool("datafusion.optimizer.prefer_hash_join", false),
+        );
+
+        let keys: Vec<i64> = (1..=12).collect();
+        let vals: Vec<i64> = keys.iter().map(|k| k * 10).collect();
+        let left_df = keyed_df(&ctx, "id", "lv", &keys, &vals).await;
+        let right_df = keyed_df(&ctx, "fk", "rv", &keys, &vec![1i64; keys.len()]).await;
+
+        let mut left_ckptr = ParquetCheckpointer::new(store_url.clone(), base.clone());
+        let mut right_ckptr = ParquetCheckpointer::new(store_url.clone(), base.clone());
+
+        let left = left_ckptr
+            .push_pre_sorted(&ctx, "left", left_df, "id")
+            .await?;
+        let right = right_ckptr
+            .push_pre_sorted(&ctx, "right", right_df, "fk")
+            .await?;
+
+        let joined = left.join(right, JoinType::Inner, &["id"], &["fk"], None)?;
+        let plan = joined.create_physical_plan().await?;
+        let rendered = displayable(plan.as_ref()).indent(true).to_string();
+        println!("PUSH_PRE_SORTED SMJ PLAN:\n{rendered}");
+
+        assert!(
+            rendered.contains("SortMergeJoinExec"),
+            "expected SMJ; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("RepartitionExec"),
+            "expected NO repartition (co-partitioning not recognised):\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("SortExec"),
+            "expected NO sort (sortedness not recognised):\n{rendered}"
+        );
+
+        let _ = TempGuard(dir); // cleanup
         Ok(())
     }
 }

@@ -355,7 +355,7 @@ impl PregelBuilder {
         );
 
         let edges_struct = edges_checkpointer
-            .push(
+            .push_pre_sorted(
                 ctx,
                 "edges",
                 self.graph.edges.clone().select(
@@ -363,7 +363,7 @@ impl PregelBuilder {
                         .iter()
                         .map(|name| col(name).alias(format!("{}_{}", PREGEL_MSG_EDGE, name))),
                 )?,
-                None,
+                &format!("{}_{}", PREGEL_MSG_EDGE, EDGE_SRC),
             )
             .await?;
 
@@ -374,7 +374,7 @@ impl PregelBuilder {
         );
         // offload prepared state to disk
         current_vertices = state_checkpointer
-            .push(ctx, "state-0", current_vertices, None)
+            .push_pre_sorted(ctx, "state-0", current_vertices, VERTEX_ID)
             .await?;
 
         // Main Pregel loop
@@ -473,7 +473,6 @@ impl PregelBuilder {
                     } else {
                         messages_df
                     },
-                    None,
                 )
                 .await?;
 
@@ -491,7 +490,12 @@ impl PregelBuilder {
                 .select(update_columns.clone())?;
 
             current_vertices = state_checkpointer
-                .push(ctx, &format!("state-{}", iteration), new_vertices, None)
+                .push_pre_sorted(
+                    ctx,
+                    &format!("state-{}", iteration),
+                    new_vertices,
+                    VERTEX_ID,
+                )
                 .await?;
 
             // remove the old checkpoints
