@@ -214,8 +214,8 @@ impl DataSource for HashPartitionedSource {
         self.inner.metrics()
     }
 
-    fn create_sibling_state(&self) -> Option<Arc<dyn Any + Send + Sync>> {
-        self.inner.create_sibling_state()
+    fn create_sibling_state(&self, _config: &ConfigOptions) -> Option<Arc<dyn Any + Send + Sync>> {
+        self.inner.create_sibling_state(_config)
     }
 
     fn try_pushdown_filters(
