@@ -39,3 +39,29 @@ jobs:
 
       - name: Run tests
         run: cargo test
+
+      - name: Build CLI binary
+        run: cargo build --bin graphframes
+
+      - name: Smoke-test the CLI
+        run: |
+          set -euo pipefail
+          BIN=./target/debug/graphframes
+          V=./testing/data/ldbc/example-directed-v.parquet
+          E=./testing/data/ldbc/example-directed-e.parquet
+          COMMON="--vertices $V --edges $E --src-col-name source --dst-col-name target --checkpoint-dir /tmp/gf_ci_work"
+
+          $BIN page-rank     $COMMON --tol 0.01     --output file:///tmp/ci_pr/
+          $BIN wcc           $COMMON --seed 42      --output file:///tmp/ci_wcc/
+          $BIN mis           $COMMON                --output file:///tmp/ci_mis/
+          $BIN kcore         $COMMON                --output file:///tmp/ci_kcore/
+          $BIN hyperanf      $COMMON --n-hops 3     --output file:///tmp/ci_hyperanf/
+          $BIN shortest-path $COMMON --landmarks 1  --output file:///tmp/ci_sp/
+
+          # Each command must have produced parquet output.
+          for d in pr wcc mis kcore hyperanf sp; do
+            if ! ls -A "/tmp/ci_$d" | grep -q .; then
+              echo "::error::no output written in /tmp/ci_$d"
+              exit 1
+            fi
+          done

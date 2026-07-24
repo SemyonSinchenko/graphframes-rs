@@ -11,8 +11,10 @@ release/
 *~
 \#*
 *#
-*.parquet
 gf_df_tmp*
 gf_checkpoints*
 test-test*
 .#*
+graph500*
+twitter_mpi*
+

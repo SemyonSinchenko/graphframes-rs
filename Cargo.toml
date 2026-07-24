@@ -9,6 +9,8 @@ exclude = [
 ]
 
 [dependencies]
+
+# Core dependencies
 datafusion = "54.1.0"
 async-trait = "0.1"
 tokio = {version = "1", features = ["full"] }
@@ -16,10 +18,17 @@ url = "2"
 futures = "0.3"
 uuid = {version = "1", features = ["v4"] }
 log = "0.4"
-env_logger = "0.11"
-snmalloc-rs = "0.7"
 rand = { version = "0.9", features = ["std_rng"] }
 datasketches = { version = "0.3.0", default-features = false, features = ["hll"] }
+
+# CLI dependencies
+clap = { version = "4.5", features = ["derive", "env"], optional = true}
+env_logger = { version = "0.11", optional = true }
+snmalloc-rs = { version = "0.7", optional = true }
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:env_logger", "dep:snmalloc-rs"]
 
 [dev-dependencies]
 criterion = { version = "0.7", features = ["html_reports", "async_tokio"] }
@@ -38,5 +47,6 @@ name = "sp_benchmark"
 harness = false
 
 [[bin]]
-name = "run-algorithm"
+name = "graphframes"
 path = "src/main.rs"
+required-features = ["cli"]
