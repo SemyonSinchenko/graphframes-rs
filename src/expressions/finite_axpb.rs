@@ -1,3 +1,4 @@
+use crate::expressions::common::downcast_int64;
 use datafusion::arrow::array::{Array, ArrayRef, Int64Array};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::DataFusionError;
@@ -73,9 +74,9 @@ impl ScalarUDFImpl for FiniteAxPlusB {
                 arrays.len()
             )));
         }
-        let a = downcast_int64(&arrays[0], "first")?;
-        let x = downcast_int64(&arrays[1], "second")?;
-        let b = downcast_int64(&arrays[2], "third")?;
+        let a = downcast_int64(&arrays[0], "finite_axpb", "first")?;
+        let x = downcast_int64(&arrays[1], "finite_axpb", "second")?;
+        let b = downcast_int64(&arrays[2], "finite_axpb", "third")?;
 
         let len = arrays
             .iter()
@@ -113,15 +114,6 @@ impl ScalarUDFImpl for FiniteAxPlusB {
 
         Ok(ColumnarValue::Array(Arc::new(result) as ArrayRef))
     }
-}
-
-fn downcast_int64<'a>(array: &'a ArrayRef, label: &str) -> Result<&'a Int64Array> {
-    array.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-        DataFusionError::Plan(format!(
-            "finite_axpb {label} argument must be Int64, got: {:?}",
-            array.data_type()
-        ))
-    })
 }
 
 /// Builds an [`Expr`] that applies `finite_axpb(a, x, b)` to three

@@ -1492,6 +1492,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "datasketches"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46c4cf71a36b46dcfc00e5014c0c20ccad2b1b6a008304d7d57d2749b2d41b3d"
+
+[[package]]
 name = "defmt"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1815,6 +1821,7 @@ dependencies = [
  "async-trait",
  "criterion",
  "datafusion",
+ "datasketches",
  "env_logger",
  "futures",
  "log",
