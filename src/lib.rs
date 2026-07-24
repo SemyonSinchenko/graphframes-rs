@@ -3,6 +3,8 @@ mod expressions;
 mod memory;
 mod utils;
 
+pub use utils::GraphFramesConfig;
+
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::plan_err;
 use datafusion::error::Result;

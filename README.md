@@ -2,11 +2,72 @@
 
 An experimental single node out-of core graph algorithms.
 
-**!NOTE!**
+## Usage
 
-_At the moment it is just a core. The existing `main.rs` should be fine for benchmarking / experimenting, but it is NOT A STABLE PUBLIC CONTRACT! I'm (the author) have an experience with distributed (out-of-core) graph algorithms but I have zero experience with building publuc surface APIs for DataFusion projects. So, there is not public API behind the existing low-level builder methods of the `GraphFrame` struct. I do not know yet what is the best way to make a DataFusion plugin, how should it work (Python? FFI? Arrow Flight?) as well how such an API should looks like. Should it even be a programmatic API with full access to methods or just a CLI/Server that supports DSL? If you are interesting in the project and have an idea (or experience with DataFusion-based public surface APIs) how the public surface should look like please, open an issue and share. I will appreciate. I'm (the author) interested in learning Rust, DataFusion and out-of-core graph analytics, so for me the public surface is not the top priority!_
+### CLI
 
-**Supported algorithms**
+#### Installation
+
+```sh
+cargo install --git https://github.com/SemyonSinchenko/graphframes-rs
+```
+
+This builds and installs the `graphframes` binary. The CLI is part of the default feature set, so no extra flags are required.
+
+#### CLI
+
+The binary takes an algorithm as a subcommand, reads a graph from a vertices file and an edges file, and writes the result as parquet to an output directory.
+
+```sh
+graphframes page-rank \
+  --vertices vertices.parquet \
+  --edges edges.parquet \
+  --output file:///tmp/pagerank/ \
+  --tol 0.01
+```
+
+Vertices must contain an Int64 `id` column; edges must contain Int64 `src` and `dst` columns. If your input uses different names, map them with `--id-col-name`, `--src-col-name`, and `--dst-col-name`. The input format defaults to parquet; `--format csv` and `--format json` are also available.
+
+Available algorithms:
+
+- `page-rank`: PageRank centrality;
+- `wcc`: Weakly Connected Components;
+- `mis`: Maximal Independent Set;
+- `kcore`: K-Core decomposition;
+- `hyperanf`: Approximate Neighbor Function;
+- `shortest-path`: Multi-Source Shortest Path;
+
+Each has its own arguments — run `graphframes <algorithm> --help` for the full list. For what each algorithm computes, see [References](#references).
+
+#### Tuning
+
+This project is designed to be out-of-core and rely on DataFusion spilling during joins and manually offloading to disk intermediate stages. Three knobs trade off memory, parallelism, and disk usage. Each can be set on the command line **or** via an environment variable; the flag takes precedence over the env var, which takes precedence over the default.
+
+**a) Memory pool** — `--max-memory` (env `GRAPHFRAMES_MAX_MEMORY`, default `4G`).
+
+Size of the DataFusion's spill pool ([`FairSpillPool`](https://docs.rs/datafusion/latest/datafusion/execution/memory_pool/struct.FairSpillPool.html)). Operators that exceed their share of the pool spill intermediate data to disk instead of failing with an out-of-memory error. A larger value reduces spilling at the cost of RAM.
+
+**b) Parallelism** — `--num-workers` (env `GRAPHFRAMES_NUM_WORKERS`, default `2`).
+
+Maps to DataFusion's `target_partitions`: the number of partitions the engine processes concurrently.
+
+**c) The trade-off.**
+
+The spill pool is shared fairly among the operators running at the same time. Raising `--num-workers` runs more partitions concurrently, which tends to increase the number of concurrent memory consumers and so shrinks the fair share each one gets. More workers means more parallelism but more spilling (and slower work per partition); fewer workers means more memory per consumer but less parallelism. There is no universally correct value — measure on your own graph and hardware. Defaults are ~fine for something less than 500M of edges.
+
+**d) Input / output.**
+
+Input format is parquet by default; `--format csv` and `--format json` are supported and follow DataFusion's default schema inference and parsing. Output is always parquet, written to a `file://` directory; the directory is created if it does not exist.
+
+**e) Checkpoint / spill directory** — `--checkpoint-dir` (env `GRAPHFRAMES_WORKDIR`, default `gf_workdir`).
+
+The work directory holds two kinds of data: the algorithms' parquet checkpoints (written and re-read between iterations) and DataFusion's spill files. Both are high-throughput and latency-sensitive, and on large graphs the algorithms can stream large amounts of data through them. On my experiments during processing billion-scale graphs with limited memory (~5-6GB limit) the process read from disk more than 200GBs. Point this at the fastest local storage available, preferably a dedicated NVMe or SSD. Network filesystems and spinning disks will make spill and checkpoint latency dominate runtime. The directory is created if missing; relative paths resolve against the current directory. `--max-temp-file` (env `GRAPHFRAMES_MAX_TEMP_FILE`, default `200G`) bounds the total size of the spill subdirectory. For graphs of the size of few billions edges and vertices the default may be not enough.
+
+### Libraray
+
+TBD
+
+## References
 
 1. **Pregel**: _Malewicz, Grzegorz, et al. "Pregel: a system for large-scale graph processing." Proceedings of the 2010 ACM SIGMOD International Conference on Management of data. 2010._
    - **PageRank**: _Zadeh, R., et al. "Cme 323: Distributed algorithms and optimization, spring 2015." University Lecture (2015)._
