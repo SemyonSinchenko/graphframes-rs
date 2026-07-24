@@ -15,3 +15,4 @@ release/
 gf_df_tmp*
 gf_checkpoints*
 test-test*
+.#*
