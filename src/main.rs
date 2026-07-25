@@ -309,7 +309,13 @@ async fn setup(common: &CommonArgs) -> Result<(SessionContext, GraphFrame, Objec
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("graphframes_rs=info"),
+    )
+    // Use env_logger's default format (timestamp + colored level + message)
+    // but drop the module path;
+    .format_target(false)
+    .init();
 
     let cli = Cli::parse();
 
