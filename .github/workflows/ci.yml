@@ -57,6 +57,7 @@ jobs:
           $BIN kcore         $COMMON                --output file:///tmp/ci_kcore/
           $BIN hyperanf      $COMMON --n-hops 3     --output file:///tmp/ci_hyperanf/
           $BIN shortest-path $COMMON --landmarks 1  --output file:///tmp/ci_sp/
+          $BIN classical-lp  $COMMON                --output file:///tmp/clp/
 
           # Each command must have produced parquet output.
           for d in pr wcc mis kcore hyperanf sp; do

@@ -36,6 +36,7 @@ Available algorithms:
 - `kcore`: K-Core decomposition;
 - `hyperanf`: Approximate Neighbor Function;
 - `shortest-path`: Multi-Source Shortest Path;
+- `classical-lp`: Classical (Raghavan) Label Propagaion
 
 Each has its own arguments — run `graphframes <algorithm> --help` for the full list. For what each algorithm computes, see [References](#references).
 
@@ -69,10 +70,27 @@ TBD
 
 ## References
 
-1. **Pregel**: _Malewicz, Grzegorz, et al. "Pregel: a system for large-scale graph processing." Proceedings of the 2010 ACM SIGMOD International Conference on Management of data. 2010._
-   - **PageRank**: _Zadeh, R., et al. "Cme 323: Distributed algorithms and optimization, spring 2015." University Lecture (2015)._
-   - **Multi Source Shortest Paths**: _Malewicz, Grzegorz, et al. "Pregel: a system for large-scale graph processing." Proceedings of the 2010 ACM SIGMOD International Conference on Management of data. 2010._
-   - **K-Core**: _Mandal, Aritra, and Mohammad Al Hasan. "A distributed k-core decomposition algorithm on spark." 2017 IEEE International Conference on Big Data (Big Data). IEEE, 2017._
-2. **Weakly Connected Components**: _Bögeholz, Harald, Michael Brand, and Radu-Alexandru Todor. "In-database connected component analysis." 2020 IEEE 36th International Conference on Data Engineering (ICDE). IEEE, 2020._
-3. **Maximal Independent Set**: _Ghaffari, Mohsen. "An improved distributed algorithm for maximal independent set." Proceedings of the twenty-seventh annual ACM-SIAM symposium on Discrete algorithms. Society for Industrial and Applied Mathematics, 2016._
-4. **Approximate Neighbor Function**: _Boldi, Paolo, Marco Rosa, and Sebastiano Vigna. "HyperANF: Approximating the neighbourhood function of very large graphs on a budget." Proceedings of the 20th international conference on World Wide Web. 2011._
+### Core
+
+- **Pregel**:
+  - _Malewicz, Grzegorz, et al. "Pregel: a system for large-scale graph processing." Proceedings of the 2010 ACM SIGMOD International Conference on Management of data. 2010._
+  - _Gonzalez, Joseph E., et al. "{GraphX}: Graph processing in a distributed dataflow framework." 11th USENIX symposium on operating systems design and implementation (OSDI 14). 2014._
+
+### Centrality Metrics
+
+- **PageRank**: _Zadeh, R., et al. "Cme 323: Distributed algorithms and optimization, spring 2015." University Lecture (2015)._
+- **K-Core**: _Mandal, Aritra, and Mohammad Al Hasan. "A distributed k-core decomposition algorithm on spark." 2017 IEEE International Conference on Big Data (Big Data). IEEE, 2017._
+- **Approximate Neighbor Function**: _Boldi, Paolo, Marco Rosa, and Sebastiano Vigna. "HyperANF: Approximating the neighbourhood function of very large graphs on a budget." Proceedings of the 20th international conference on World Wide Web. 2011._
+
+### Connectivity
+
+- **Multi Source Shortest Paths**: _Malewicz, Grzegorz, et al. "Pregel: a system for large-scale graph processing." Proceedings of the 2010 ACM SIGMOD International Conference on Management of data. 2010._
+- **Weakly Connected Components**: _Bögeholz, Harald, Michael Brand, and Radu-Alexandru Todor. "In-database connected component analysis." 2020 IEEE 36th International Conference on Data Engineering (ICDE). IEEE, 2020._
+
+### Community Detection
+
+- **Classical Label Propagation**: _Raghavan, Usha Nandini, Réka Albert, and Soundar Kumara. "Near linear time algorithm to detect community structures in large-scale networks." Physical Review E—Statistical, Nonlinear, and Soft Matter Physics 76.3 (2007): 036106._
+
+### Subgraphs
+
+- **Maximal Independent Set**: _Ghaffari, Mohsen. "An improved distributed algorithm for maximal independent set." Proceedings of the twenty-seventh annual ACM-SIAM symposium on Discrete algorithms. Society for Industrial and Applied Mathematics, 2016._
