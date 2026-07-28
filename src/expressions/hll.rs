@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use datafusion::{
     arrow::{
-        array::{Array, ArrayRef, BinaryArray, BinaryViewArray, Float64Array},
+        array::{Array, ArrayRef, BinaryArray, Float64Array},
         datatypes::DataType,
     },
     error::{DataFusionError, Result},
@@ -39,63 +39,11 @@ use datafusion::{
 };
 use datasketches::hll::{HllSketch, HllType};
 
+use crate::expressions::common::as_binary_like;
 use crate::expressions::common::downcast_int64;
 
 const DEFAULT_HLL_TYPE: HllType = HllType::Hll8;
 const DEFAULT_LG_K: u8 = 12;
-
-/// Read-only accessor over either a [`BinaryArray`] or a [`BinaryViewArray`].
-///
-/// Parquet spills round-trip `Binary` sketch columns as `BinaryView` (DataFusion
-/// reads parquet `Binary` as `BinaryView`), so every sketch-consuming UDF must
-/// accept both representations.
-enum BinaryLike<'a> {
-    Fixed(&'a BinaryArray),
-    View(&'a BinaryViewArray),
-}
-
-impl<'a> BinaryLike<'a> {
-    fn len(&self) -> usize {
-        match self {
-            BinaryLike::Fixed(a) => a.len(),
-            BinaryLike::View(a) => a.len(),
-        }
-    }
-
-    fn null_count(&self) -> usize {
-        match self {
-            BinaryLike::Fixed(a) => a.null_count(),
-            BinaryLike::View(a) => a.null_count(),
-        }
-    }
-
-    fn is_null(&self, i: usize) -> bool {
-        match self {
-            BinaryLike::Fixed(a) => a.is_null(i),
-            BinaryLike::View(a) => a.is_null(i),
-        }
-    }
-
-    fn value(&self, i: usize) -> &[u8] {
-        match self {
-            BinaryLike::Fixed(a) => a.value(i),
-            BinaryLike::View(a) => a.value(i),
-        }
-    }
-}
-
-fn as_binary_like<'a>(array: &'a ArrayRef, fname: &str, label: &str) -> Result<BinaryLike<'a>> {
-    if let Some(a) = array.as_any().downcast_ref::<BinaryArray>() {
-        return Ok(BinaryLike::Fixed(a));
-    }
-    if let Some(a) = array.as_any().downcast_ref::<BinaryViewArray>() {
-        return Ok(BinaryLike::View(a));
-    }
-    Err(DataFusionError::Plan(format!(
-        "{fname} {label} argument must be Binary or BinaryView, got: {:?}",
-        array.data_type()
-    )))
-}
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub(crate) struct HllLong {

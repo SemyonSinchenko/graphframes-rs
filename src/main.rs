@@ -170,6 +170,24 @@ enum Command {
         #[arg(long)]
         to_landmarks: bool,
     },
+
+    /// Classical Label Propagation (CDLP).
+    ClassicalLp {
+        #[command(flatten)]
+        common: CommonArgs,
+
+        /// Maximum iterations (LDBC default).
+        #[arg(long, default_value_t = 10)]
+        max_iter: usize,
+
+        /// Treat the graph as undirected.
+        /// CDLP is defined on the undirected graph:
+        /// the default (`false`) treat graph as directed
+        /// symmetrizes the edge set (LDBC semantics);
+        /// pass `true` to skip symmetrization.
+        #[arg(long, default_value_t = false)]
+        undirected: bool,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -393,6 +411,20 @@ async fn main() -> Result<()> {
                 b = b.max_iterations(mi);
             }
             let _ = b
+                .set_checkpoint_dir(ckpt)
+                .run(&ctx, &common.output, false)
+                .await?;
+        }
+        Command::ClassicalLp {
+            common,
+            max_iter,
+            undirected,
+        } => {
+            let (ctx, g, ckpt) = setup(&common).await?;
+            let _ = g
+                .classical_lp()
+                .directed(undirected)
+                .max_iter(max_iter)
                 .set_checkpoint_dir(ckpt)
                 .run(&ctx, &common.output, false)
                 .await?;
