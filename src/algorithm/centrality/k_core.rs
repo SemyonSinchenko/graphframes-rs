@@ -1,11 +1,11 @@
 use crate::algorithm::pregel::{MessageDirection, pregel_default_msg, pregel_src};
-use crate::expressions::kcore_merge_expr;
+use crate::expressions::kcore_reduce;
 use crate::memory::CheckpointConfig;
 use crate::utils::symmetrize;
 use crate::{EDGE_DST, EDGE_SRC, GraphFrame, VERTEX_ID};
+use datafusion::arrow::datatypes::DataType;
 use datafusion::error::Result;
 use datafusion::execution::object_store::ObjectStoreUrl;
-use datafusion::functions_aggregate::array_agg::array_agg;
 use datafusion::functions_aggregate::count::count;
 use datafusion::object_store::path::Path;
 use datafusion::prelude::*;
@@ -108,14 +108,17 @@ impl<'a> KCoreBuilder<'a> {
             .select(vec![col(VERTEX_ID)])?
             .join(degrees, JoinType::Left, &[VERTEX_ID], &[EDGE_SRC], None)?
             .with_column(DEGREE, coalesce(vec![col(DEGREE), lit(0i64)]))?
-            .select(vec![col(VERTEX_ID), col(DEGREE)])?;
+            .select(vec![
+                col(VERTEX_ID),
+                cast(col(DEGREE), DataType::Int32).alias(DEGREE),
+            ])?;
 
         let prepared_graph = GraphFrame {
             vertices: prepared_vertices,
             edges: prepared_edges,
         };
 
-        let new_core = kcore_merge_expr(pregel_default_msg(), col(KCORE));
+        let new_core = coalesce(vec![pregel_default_msg(), lit(0)]);
 
         let mut pregel_builder = prepared_graph
             .pregel()
@@ -127,7 +130,7 @@ impl<'a> KCoreBuilder<'a> {
             // corrupt their estimates. Early stopping therefore relies on
             // the voting column alone, never on participation pruning.
             .add_message(pregel_src(KCORE), MessageDirection::SrcToDst)
-            .add_aggregate_expr(array_agg(pregel_default_msg()))
+            .add_aggregate_expr(kcore_reduce(pregel_default_msg()))
             // A vertex votes "still active" exactly while its core number
             // changed this iteration; the run stops once nobody changed.
             .with_vertex_voting("active", col(KCORE).not_eq(new_core.clone()))
@@ -156,7 +159,7 @@ impl GraphFrame {
 mod tests {
     use super::*;
     use crate::utils::collect_to_i64;
-    use datafusion::arrow::array::Int64Array;
+    use datafusion::arrow::array::{Int32Array, Int64Array};
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
@@ -224,13 +227,14 @@ mod tests {
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .unwrap();
+            // KCORE is Int32 (see `kcore_reduce`); vertex id stays Int64.
             let cores = batch
                 .column(1)
                 .as_any()
-                .downcast_ref::<Int64Array>()
+                .downcast_ref::<Int32Array>()
                 .unwrap();
             for i in 0..ids.len() {
-                map.insert(ids.value(i), cores.value(i));
+                map.insert(ids.value(i), cores.value(i) as i64);
             }
         }
         Ok(map)
@@ -512,9 +516,10 @@ mod tests {
             .run(&ctx, &output_uri, false)
             .await?;
 
+        // KCORE is Int32; cast to Int64 so `collect_to_i64` can read it.
         let result = read_result(&ctx, &output_uri)
             .await?
-            .select(vec![col(VERTEX_ID), col(KCORE)])?;
+            .select(vec![col(VERTEX_ID), cast(col(KCORE), DataType::Int64)])?;
         let values = collect_to_i64(&result.sort_by(vec![col(VERTEX_ID)])?, 1).await?;
         assert_eq!(values, &[2, 2, 2]);
         Ok(())

@@ -1,4 +1,6 @@
-use datafusion::arrow::array::{Array, ArrayRef, BinaryArray, BinaryViewArray, Int64Array};
+use datafusion::arrow::array::{
+    Array, ArrayRef, BinaryArray, BinaryViewArray, Int32Array, Int64Array,
+};
 use datafusion::error::{DataFusionError, Result};
 
 /// Helper for other UDFs: vertexId and edgeSrc / edgeDst are all i64
@@ -10,6 +12,21 @@ pub(crate) fn downcast_int64<'a>(
     array.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
         DataFusionError::Plan(format!(
             "{fname} {label} argument must be Int64, got: {:?}",
+            array.data_type()
+        ))
+    })
+}
+
+/// Helper for other UDFs: with assumption degree < i32::MAX
+/// this one is a common thing.
+pub(crate) fn downcast_int32<'a>(
+    array: &'a ArrayRef,
+    fname: &str,
+    label: &str,
+) -> Result<&'a Int32Array> {
+    array.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
+        DataFusionError::Plan(format!(
+            "{fname} {label} argument must be Int32, got: {:?}",
             array.data_type()
         ))
     })
