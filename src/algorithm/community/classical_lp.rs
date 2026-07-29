@@ -93,7 +93,7 @@ impl<'a> ClassicalLPBuilder<'a> {
             // Aggregate the neighbour labels carried by the *messages*
             // (`__pregel_msg_msg`), not the `community` vertex column, which
             // does not exist in the aggregated-messages frame.
-            .add_aggregate_expr(most_common_by(pregel_default_msg(), lit(1.0)))
+            .add_aggregate_expr(most_common_by(pregel_default_msg(), lit(1.0f32)))
             .max_iterations(self.max_iter)
             .skip_dest_state()
             .with_checkpoint_store(self.checkpoint_config.store_url.clone())

@@ -64,9 +64,13 @@ Input format is parquet by default; `--format csv` and `--format json` are suppo
 
 The work directory holds two kinds of data: the algorithms' parquet checkpoints (written and re-read between iterations) and DataFusion's spill files. Both are high-throughput and latency-sensitive, and on large graphs the algorithms can stream large amounts of data through them. On my experiments during processing billion-scale graphs with limited memory (~5-6GB limit) the process read from disk more than 200GBs. Point this at the fastest local storage available, preferably a dedicated NVMe or SSD. Network filesystems and spinning disks will make spill and checkpoint latency dominate runtime. The directory is created if missing; relative paths resolve against the current directory. `--max-temp-file` (env `GRAPHFRAMES_MAX_TEMP_FILE`, default `200G`) bounds the total size of the spill subdirectory. For graphs of the size of few billions edges and vertices the default may be not enough.
 
-### Libraray
+### Library
 
 TBD
+
+## Known Limitations
+
+- Some algorithms (K-Core, Label Propagation, etc.) are implemented with an assumption that the single node degree in the graph is always less than `i32::MAX`. In other words it is assummed that each node has less than ~2 billions neighbors / adjacent edges. While it is possible to support graph with hubs with more than 2B neighbors it will introduce a performance degradation for anything less (99.999% of all the graphs in the world). If you are working with a graph where a hub has degree gretater than 2B I would recommend to take a look on edges prunning technique if you want to use this library.
 
 ## References
 

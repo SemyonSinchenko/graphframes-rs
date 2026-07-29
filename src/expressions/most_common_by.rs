@@ -1,7 +1,13 @@
+//! Most Commont By aggregation.
+//!
+//! Limited by design.
+//! For the given (a: i64, b: f64) returns a value of a
+//! for which the sum(b) is maximal. Tie-breaking is based
+//! on value of a itself (minimal, LDBC Label Propagation semantics)
 use std::sync::Arc;
 
 use crate::expressions::common::{as_binary_like, downcast_int64};
-use datafusion::arrow::array::{ArrayRef, Float64Array};
+use datafusion::arrow::array::{ArrayRef, Float32Array};
 use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::common::HashMap;
 use datafusion::error::{DataFusionError, Result};
@@ -14,7 +20,7 @@ use datafusion::scalar::ScalarValue;
 
 #[derive(Debug)]
 pub(crate) struct MostCommonByAccumulator {
-    sums: HashMap<i64, f64>,
+    sums: HashMap<i64, f32>,
 }
 
 impl MostCommonByAccumulator {
@@ -25,10 +31,10 @@ impl MostCommonByAccumulator {
     }
 }
 
-fn se_map(m: &HashMap<i64, f64>) -> Vec<u8> {
+fn se_map(m: &HashMap<i64, f32>) -> Vec<u8> {
     // We are assumming that a single node degree < i32::MAX
     let n = m.len() as u32;
-    let mut buf = Vec::with_capacity(4 + 16usize * (n as usize));
+    let mut buf = Vec::with_capacity(4 + 12usize * (n as usize));
     buf.extend_from_slice(&n.to_le_bytes());
 
     for (&k, &v) in m.iter() {
@@ -39,23 +45,23 @@ fn se_map(m: &HashMap<i64, f64>) -> Vec<u8> {
     buf
 }
 
-fn de_map_and_insert(buf: &[u8], map: &mut HashMap<i64, f64>) -> Result<()> {
+fn de_map_and_insert(buf: &[u8], map: &mut HashMap<i64, f32>) -> Result<()> {
     if buf.len() < 4 {
         return Err(DataFusionError::Execution(
             "most_common_by: corrupt state (length less 4)".to_string(),
         ));
     }
     let n = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
-    if buf.len() != 4 + 16 * n {
+    if buf.len() != 4 + 12 * n {
         return Err(DataFusionError::Execution(
             "most_common_by: corrupt state (length mismatch)".to_string(),
         ));
     }
 
     for i in 0..n {
-        let o = 4 + 16 * i;
+        let o = 4 + 12 * i;
         let k = i64::from_le_bytes(buf[o..o + 8].try_into().unwrap());
-        let v = f64::from_le_bytes(buf[o + 8..o + 16].try_into().unwrap());
+        let v = f32::from_le_bytes(buf[o + 8..o + 12].try_into().unwrap());
         *map.entry(k).or_insert(0.0) += v;
     }
 
@@ -65,9 +71,9 @@ fn de_map_and_insert(buf: &[u8], map: &mut HashMap<i64, f64>) -> Result<()> {
 impl Accumulator for MostCommonByAccumulator {
     fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
         let labels = downcast_int64(&values[0], "most_common_by", "first")?;
-        let weights = &values[1].as_any().downcast_ref::<Float64Array>().ok_or(
+        let weights = &values[1].as_any().downcast_ref::<Float32Array>().ok_or(
             DataFusionError::Execution(
-                "expected most_common_by secobd argument be f64 array".to_string(),
+                "expected most_common_by second argument be f32 array".to_string(),
             ),
         )?;
 
@@ -92,7 +98,7 @@ impl Accumulator for MostCommonByAccumulator {
             return Ok(ScalarValue::Int64(None));
         }
         let mut max = -1;
-        let mut max_value = f64::MIN;
+        let mut max_value = f32::MIN;
 
         for (k, v) in self.sums.iter() {
             if v > &max_value {
@@ -112,7 +118,7 @@ impl Accumulator for MostCommonByAccumulator {
     }
 
     fn size(&self) -> usize {
-        size_of::<Self>() + self.sums.capacity() * (size_of::<i64>() + size_of::<f64>())
+        size_of::<Self>() + self.sums.capacity() * (size_of::<i64>() + size_of::<f32>())
     }
 
     fn state(&mut self) -> Result<Vec<ScalarValue>> {
@@ -141,7 +147,7 @@ impl MostCommonBy {
     pub(crate) fn new() -> Self {
         Self {
             signature: Signature::exact(
-                vec![DataType::Int64, DataType::Float64],
+                vec![DataType::Int64, DataType::Float32],
                 Volatility::Immutable,
             ),
         }
@@ -161,11 +167,11 @@ impl AggregateUDFImpl for MostCommonBy {
         if (arg_types.len() != 2)
             || !matches!(
                 (&arg_types[0], &arg_types[1]),
-                (DataType::Int64, DataType::Float64)
+                (DataType::Int64, DataType::Float32)
             )
         {
             return Err(DataFusionError::Plan(format!(
-                "most_common_by expets exactly two arguments of types i64 and f64 but got {arg_types:?}"
+                "most_common_by expets exactly two arguments of types i64 and f32 but got {arg_types:?}"
             )));
         }
 
@@ -199,7 +205,7 @@ pub(crate) fn most_common_by(a: Expr, b: Expr) -> Expr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::arrow::array::{BinaryArray, Float64Array, Int64Array, RecordBatch};
+    use datafusion::arrow::array::{BinaryArray, Float32Array, Int64Array, RecordBatch};
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::datasource::MemTable;
     use datafusion::prelude::SessionConfig;
@@ -212,7 +218,7 @@ mod tests {
         // label 1 -> 5.0 (2+3), label 2 -> 10.0 -> winner 2
         acc.update_batch(&[
             Arc::new(Int64Array::from(vec![1i64, 2, 1])) as ArrayRef,
-            Arc::new(Float64Array::from(vec![2.0f64, 10.0, 3.0])) as ArrayRef,
+            Arc::new(Float32Array::from(vec![2.0f32, 10.0, 3.0])) as ArrayRef,
         ])
         .unwrap();
         assert_eq!(acc.evaluate().unwrap(), ScalarValue::Int64(Some(2)));
@@ -231,7 +237,7 @@ mod tests {
         let mut acc = MostCommonByAccumulator::new();
         acc.update_batch(&[
             Arc::new(Int64Array::from(vec![5i64, 2])) as ArrayRef,
-            Arc::new(Float64Array::from(vec![5.0f64, 5.0])) as ArrayRef,
+            Arc::new(Float32Array::from(vec![5.0f32, 5.0])) as ArrayRef,
         ])
         .unwrap();
         assert_eq!(acc.evaluate().unwrap(), ScalarValue::Int64(Some(2)));
@@ -242,12 +248,12 @@ mod tests {
     /// bogus `n` and the length check rejects the blob).
     #[test]
     fn test_se_de_map_roundtrip_preserves_sums() {
-        let mut original: HashMap<i64, f64> = HashMap::new();
+        let mut original: HashMap<i64, f32> = HashMap::new();
         original.insert(1, 3.0);
         original.insert(2, 5.5);
         original.insert(-7, 0.25);
         let bytes = se_map(&original);
-        let mut restored: HashMap<i64, f64> = HashMap::new();
+        let mut restored: HashMap<i64, f32> = HashMap::new();
         de_map_and_insert(&bytes, &mut restored).unwrap();
         assert_eq!(restored.len(), original.len());
         for (k, v) in &original {
@@ -263,9 +269,9 @@ mod tests {
     /// (keeping only the local winner would not be associative across partitions).
     #[test]
     fn test_de_map_and_insert_accumulates_not_overwrites() {
-        let mut m: HashMap<i64, f64> = HashMap::new();
+        let mut m: HashMap<i64, f32> = HashMap::new();
         m.insert(1, 3.0);
-        let mut partial: HashMap<i64, f64> = HashMap::new();
+        let mut partial: HashMap<i64, f32> = HashMap::new();
         partial.insert(1, 2.0); // shared key
         partial.insert(5, 1.0); // new key
         let bytes = se_map(&partial);
@@ -283,7 +289,7 @@ mod tests {
     /// A corrupt/truncated state blob must surface as a query error, not a panic.
     #[test]
     fn test_de_map_and_insert_malformed_errors() {
-        let mut m: HashMap<i64, f64> = HashMap::new();
+        let mut m: HashMap<i64, f32> = HashMap::new();
         // Header claims 1 entry but there is no payload -> length mismatch.
         assert!(de_map_and_insert(&1u32.to_le_bytes(), &mut m).is_err());
         // Empty buffer -> length < 4.
@@ -300,13 +306,13 @@ mod tests {
         // a: {1->3, 2->2}  local winner 1
         a.update_batch(&[
             Arc::new(Int64Array::from(vec![1i64, 2])) as ArrayRef,
-            Arc::new(Float64Array::from(vec![3.0f64, 2.0])) as ArrayRef,
+            Arc::new(Float32Array::from(vec![3.0f32, 2.0])) as ArrayRef,
         ])
         .unwrap();
         // b: {2->4}  local winner 2
         b.update_batch(&[
             Arc::new(Int64Array::from(vec![2i64])) as ArrayRef,
-            Arc::new(Float64Array::from(vec![4.0f64])) as ArrayRef,
+            Arc::new(Float32Array::from(vec![4.0f32])) as ArrayRef,
         ])
         .unwrap();
 
@@ -330,7 +336,7 @@ mod tests {
         let df = dataframe!(
             "g" => vec![0i64, 0, 0, 0],
             "a" => vec![1i64, 2, 1, 2],
-            "b" => vec![5.0f64, 1.0, 1.0, 2.0],
+            "b" => vec![5.0f32, 1.0, 1.0, 2.0],
         )?;
         let out = df
             .aggregate(
@@ -354,7 +360,7 @@ mod tests {
     async fn test_most_common_by_tie_picks_min_label() -> Result<()> {
         let df = dataframe!(
             "a" => vec![5i64, 2],
-            "b" => vec![5.0f64, 5.0],
+            "b" => vec![5.0f32, 5.0],
         )?;
         let out = df
             .aggregate(vec![], vec![most_common_by(col("a"), col("b")).alias("m")])?
@@ -375,7 +381,7 @@ mod tests {
         let df = dataframe!(
             "g" => vec![0i64, 0, 0, 1, 1, 1],
             "a" => vec![1i64, 2, 1, 10, 20, 20],
-            "b" => vec![1.0f64, 3.0, 1.0, 5.0, 2.0, 2.0],
+            "b" => vec![1.0f32, 3.0, 1.0, 5.0, 2.0, 2.0],
         )?;
         let out = df
             .aggregate(
@@ -415,9 +421,9 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Int64, false),
             Field::new("a", DataType::Int64, false),
-            Field::new("b", DataType::Float64, false),
+            Field::new("b", DataType::Float32, false),
         ]));
-        let mk = |labels: Vec<i64>, weights: Vec<f64>| {
+        let mk = |labels: Vec<i64>, weights: Vec<f32>| {
             let n = labels.len();
             RecordBatch::try_new(
                 schema.clone(),
@@ -426,14 +432,14 @@ mod tests {
                         std::iter::repeat(0i64).take(n),
                     )) as ArrayRef,
                     Arc::new(Int64Array::from(labels)) as ArrayRef,
-                    Arc::new(Float64Array::from(weights)) as ArrayRef,
+                    Arc::new(Float32Array::from(weights)) as ArrayRef,
                 ],
             )
             .unwrap()
         };
         // P1: 100 edges label 1 -> {1: 100}; P2: 150 edges label 2 -> {2: 150}.
-        let p1 = mk(vec![1i64; 100], vec![1.0f64; 100]);
-        let p2 = mk(vec![2i64; 150], vec![1.0f64; 150]);
+        let p1 = mk(vec![1i64; 100], vec![1.0f32; 100]);
+        let p2 = mk(vec![2i64; 150], vec![1.0f32; 150]);
 
         let table = MemTable::try_new(schema, vec![vec![p1], vec![p2]]).unwrap();
         let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(2));
@@ -460,12 +466,12 @@ mod tests {
         assert_eq!(m.value(0), 2);
     }
 
-    /// `return_type` must accept exactly (Int64, Float64) and reject the rest.
+    /// `return_type` must accept exactly (Int64, Float32) and reject the rest.
     #[test]
     fn test_most_common_by_return_type_validation() {
         let udf = MostCommonBy::new();
         assert_eq!(
-            udf.return_type(&[DataType::Int64, DataType::Float64])
+            udf.return_type(&[DataType::Int64, DataType::Float32])
                 .unwrap(),
             DataType::Int64
         );
@@ -475,11 +481,11 @@ mod tests {
                 .is_err()
         );
         assert!(
-            udf.return_type(&[DataType::Float64, DataType::Float64])
+            udf.return_type(&[DataType::Float64, DataType::Float32])
                 .is_err()
         );
         assert!(
-            udf.return_type(&[DataType::Int64, DataType::Float64, DataType::Int64])
+            udf.return_type(&[DataType::Int64, DataType::Float32, DataType::Int64])
                 .is_err()
         );
     }
