@@ -5,10 +5,11 @@ use datafusion::{
 use crate::{
     EDGE_DST, EDGE_SRC, GraphFrame, VERTEX_ID,
     algorithm::pregel::{MessageDirection, pregel_default_msg, pregel_src},
-    expressions::most_common_by,
+    expressions::most_common_expr,
     memory::CheckpointConfig,
     utils::symmetrize,
 };
+use datafusion::functions_aggregate::array_agg::array_agg;
 
 pub const COMMUNITY: &str = "community";
 
@@ -90,10 +91,10 @@ impl<'a> ClassicalLPBuilder<'a> {
                 coalesce(vec![pregel_default_msg(), col(COMMUNITY)]),
             )
             .add_message(pregel_src(COMMUNITY), MessageDirection::SrcToDst)
-            // Aggregate the neighbour labels carried by the *messages*
-            // (`__pregel_msg_msg`), not the `community` vertex column, which
-            // does not exist in the aggregated-messages frame.
-            .add_aggregate_expr(most_common_by(pregel_default_msg(), lit(1.0f32)))
+            // Nested expression: DataFusion splits `most_common(array_agg(...))`
+            // into the array_agg aggregate plus a most_common projection on top,
+            // so the checkpoint spill writes only the reduced O(|V|) result.
+            .add_aggregate_expr(most_common_expr(array_agg(pregel_default_msg())))
             .max_iterations(self.max_iter)
             .skip_dest_state()
             .with_checkpoint_store(self.checkpoint_config.store_url.clone())
