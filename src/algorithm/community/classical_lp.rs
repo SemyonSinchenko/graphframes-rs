@@ -215,6 +215,15 @@ mod tests {
             "expected all 8 vertices"
         );
 
+        // The result must contain exactly the same number of rows as the LDBC
+        // ground truth: a vertex silently dropped along the way would otherwise
+        // never be compared below.
+        assert_eq!(
+            calculated.clone().count().await?,
+            expected.clone().count().await?,
+            "result row count must match the LDBC ground truth row count"
+        );
+
         // Exact match: no vertex may disagree with the reference community.
         let mismatches = calculated
             .clone()

@@ -168,6 +168,14 @@ impl GraphFrame {
     /// - `VERTEX_ID`: The unique identifier of the vertex (derived from the destination of the edges).
     /// - `in_degree`: The count of incoming edges (in-degrees) for each vertex.
     ///
+    /// # Arguments
+    ///
+    /// * `include_zero_deg` - When `true`, the computed degrees are left-joined
+    ///   back onto the graph's full vertex set and missing counts are coalesced
+    ///   to `0`, so vertices with no incoming edges are still present with
+    ///   `in_degree = 0`. When `false`, only vertices with at least one incoming
+    ///   edge appear in the result.
+    ///
     /// # Returns
     /// An asynchronous function that returns:
     /// - `Ok(DataFrame)` containing the vertex IDs and their corresponding in-degrees.
@@ -188,26 +196,35 @@ impl GraphFrame {
     /// ).unwrap();
     ///
     /// let graph = GraphFrame::try_new(vertices, edges).unwrap();
-    /// let edge_count = graph.in_degrees();
+    /// let edge_count = graph.in_degrees(false);
     /// ```
-    pub async fn in_degrees(&self) -> Result<DataFrame> {
+    pub async fn in_degrees(&self, include_zero_deg: bool) -> Result<DataFrame> {
         let df = self.edges.clone().aggregate(
             vec![col(EDGE_DST)],
             vec![count(col(EDGE_SRC)).alias("in_degree")],
         )?;
-        Ok(df.select(vec![col(EDGE_DST).alias(VERTEX_ID), col("in_degree")])?)
+        let df = df.select(vec![col(EDGE_DST).alias(VERTEX_ID), col("in_degree")])?;
+        self.with_zero_degree_vertices(df, "in_degree", include_zero_deg)
     }
     /// Computes the out-degrees for each vertex in the graph.
     ///
     /// This function calculates the out-degree of each vertex by counting the number of
-    /// outcoming edges. It returns a `DataFrame`
+    /// outgoing edges. It returns a `DataFrame`
     /// containing two columns:
-    /// - `VERTEX_ID`: The unique identifier of the vertex (derived from the destination of the edges).
-    /// - `in_degree`: The count of incoming edges (in-degrees) for each vertex.
+    /// - `VERTEX_ID`: The unique identifier of the vertex (derived from the source of the edges).
+    /// - `out_degree`: The count of outgoing edges (out-degrees) for each vertex.
+    ///
+    /// # Arguments
+    ///
+    /// * `include_zero_deg` - When `true`, the computed degrees are left-joined
+    ///   back onto the graph's full vertex set and missing counts are coalesced
+    ///   to `0`, so vertices with no outgoing edges (sinks) are still present
+    ///   with `out_degree = 0`. When `false`, only vertices with at least one
+    ///   outgoing edge appear in the result.
     ///
     /// # Returns
     /// An asynchronous function that returns:
-    /// - `Ok(DataFrame)` containing the vertex IDs and their corresponding in-degrees.
+    /// - `Ok(DataFrame)` containing the vertex IDs and their corresponding out-degrees.
     /// - `Err` if the aggregation or selection operation fails.
     ///
     /// # Example
@@ -225,16 +242,40 @@ impl GraphFrame {
     /// ).unwrap();
     ///
     /// let graph = GraphFrame::try_new(vertices, edges).unwrap();
-    /// let edge_count = graph.in_degrees();
+    /// let edge_count = graph.out_degrees(false);
     /// ```
-    pub async fn out_degrees(&self) -> Result<DataFrame> {
+    pub async fn out_degrees(&self, include_zero_deg: bool) -> Result<DataFrame> {
         let df = self.edges.clone().aggregate(
             vec![col(EDGE_SRC)],
             vec![count(col(EDGE_DST)).alias("out_degree")],
         )?;
-        Ok(df.select(vec![col(EDGE_SRC).alias(VERTEX_ID), col("out_degree")])?)
+        let df = df.select(vec![col(EDGE_SRC).alias(VERTEX_ID), col("out_degree")])?;
+        self.with_zero_degree_vertices(df, "out_degree", include_zero_deg)
     }
 
+    /// When `include_zero_deg` is `true`, left-joins the computed degree counts
+    /// back onto the full vertex set and coalesces missing counts to `0`, so
+    /// vertices without a single incident edge in the counted direction still
+    /// appear in the result with degree `0` (e.g. sinks for out-degrees).
+    /// Otherwise the counts are returned as-is.
+    fn with_zero_degree_vertices(
+        &self,
+        degrees: DataFrame,
+        degree_col: &str,
+        include_zero_deg: bool,
+    ) -> Result<DataFrame> {
+        if !include_zero_deg {
+            return Ok(degrees);
+        }
+        let degrees = degrees.with_column_renamed(VERTEX_ID, "__degree_vid")?;
+        let all_vertices = self.vertices.clone().select(vec![col(VERTEX_ID)])?;
+        Ok(all_vertices
+            .join(degrees, JoinType::Left, &[VERTEX_ID], &["__degree_vid"], None)?
+            .select(vec![
+                col(VERTEX_ID),
+                coalesce(vec![col(degree_col), lit(0)]).alias(degree_col),
+            ])?)
+    }
     /// Creates a symmetric graph by duplicating all edges in the reverse direction.
     /// For each edge (a,b) in the graph, adds the edge (b,a) if it doesn't exist.
     /// Any additional edge attributes are preserved in the reversed edges.
@@ -417,7 +458,7 @@ mod tests {
     #[tokio::test]
     async fn test_in_degrees() -> Result<()> {
         let graph = create_test_graph()?;
-        let df = graph.in_degrees().await?;
+        let df = graph.in_degrees(false).await?;
         let batches = df.collect().await?;
 
         let mut degree_map = HashMap::new();
@@ -455,7 +496,7 @@ mod tests {
     #[tokio::test]
     async fn test_out_degrees() -> Result<()> {
         let graph = create_test_graph()?;
-        let df = graph.out_degrees().await?;
+        let df = graph.out_degrees(false).await?;
         let batches = df.collect().await?;
 
         let mut degree_map = HashMap::new();
@@ -486,6 +527,53 @@ mod tests {
         assert_eq!(degree_map.get(&8), Some(&2));
         assert_eq!(degree_map.get(&9), Some(&1));
         assert_eq!(degree_map.get(&10), Some(&1));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_degrees_include_zero() -> Result<()> {
+        // 1 is a pure source (no in-edges), 4 is a pure sink (no out-edges).
+        let vertices = dataframe!(VERTEX_ID => vec![1i64, 2i64, 3i64, 4i64])?;
+        let edges = dataframe!(
+            EDGE_SRC => vec![1i64, 1i64, 2i64, 3i64],
+            EDGE_DST => vec![2i64, 3i64, 4i64, 4i64],
+        )?;
+        let graph = GraphFrame { vertices, edges };
+
+        async fn degree_map(df: DataFrame) -> Result<HashMap<i64, i64>> {
+            let mut map = HashMap::new();
+            for batch in df.collect().await? {
+                let ids = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap();
+                let degrees = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap();
+                for i in 0..ids.len() {
+                    map.insert(ids.value(i), degrees.value(i));
+                }
+            }
+            Ok(map)
+        }
+
+        // Without the flag, only vertices with at least one incident edge appear.
+        let in_deg = degree_map(graph.in_degrees(false).await?).await?;
+        assert_eq!(in_deg, HashMap::from([(2, 1), (3, 1), (4, 2)]));
+
+        let out_deg = degree_map(graph.out_degrees(false).await?).await?;
+        assert_eq!(out_deg, HashMap::from([(1, 2), (2, 1), (3, 1)]));
+
+        // With the flag, every vertex is present and missing degrees are zero.
+        let in_deg = degree_map(graph.in_degrees(true).await?).await?;
+        assert_eq!(in_deg, HashMap::from([(1, 0), (2, 1), (3, 1), (4, 2)]));
+
+        let out_deg = degree_map(graph.out_degrees(true).await?).await?;
+        assert_eq!(out_deg, HashMap::from([(1, 2), (2, 1), (3, 1), (4, 0)]));
 
         Ok(())
     }
@@ -551,8 +639,8 @@ mod tests {
         assert_eq!(sym_edges, orig_edges * 2);
 
         // In and out degrees should be equal for all vertices in symmetric graph
-        let in_degrees = sym_graph.in_degrees().await?.collect().await?;
-        let out_degrees = sym_graph.out_degrees().await?.collect().await?;
+        let in_degrees = sym_graph.in_degrees(false).await?.collect().await?;
+        let out_degrees = sym_graph.out_degrees(false).await?.collect().await?;
 
         let mut in_degree_map = HashMap::new();
         let mut out_degree_map = HashMap::new();

@@ -682,6 +682,15 @@ mod tests {
             .await?;
 
         let results = read_result(&ctx, &output_uri).await?;
+        // The result must contain exactly the same number of rows as the LDBC
+        // ground truth: a vertex silently dropped along the way would otherwise
+        // never be compared below.
+        assert_eq!(
+            results.clone().count().await?,
+            expected_components.clone().count().await?,
+            "result row count must match the LDBC ground truth row count"
+        );
+
         let diff = results
             .clone()
             .join(
@@ -725,6 +734,15 @@ mod tests {
             .await?;
 
         let results = read_result(&ctx, &output_uri).await?;
+        // The result must contain exactly the same number of rows as the LDBC
+        // ground truth: a vertex silently dropped along the way would otherwise
+        // never be compared below.
+        assert_eq!(
+            results.clone().count().await?,
+            expected_components.clone().count().await?,
+            "result row count must match the LDBC ground truth row count"
+        );
+
         let diff = results
             .clone()
             .join(
