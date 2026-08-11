@@ -86,7 +86,10 @@ impl<'a> PageRankBuilder<'a> {
         let reset_prob_per_vertices = self.reset_prob;
 
         // PageRank needs the out-degree of each vertex to distribute its rank.
-        let vertices_with_degrees = self.graph.out_degrees().await?;
+        // `include_zero_deg = true` keeps zero-out-degree vertices (sinks) in the
+        // vertex set with `out_degree = 0`: dropping them would silently remove
+        // sinks from the result and lose the rank mass they should accumulate.
+        let vertices_with_degrees = self.graph.out_degrees(true).await?;
 
         // Create a temp graph that has vertices with degrees that will be used in Pregel Execution
         let graph_with_degrees = GraphFrame {
@@ -215,6 +218,7 @@ impl GraphFrame {
 mod tests {
     use super::*;
     use crate::utils::create_ldbc_test_graph;
+    use crate::{EDGE_DST, EDGE_SRC};
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use std::fs;
     use std::path::PathBuf;
@@ -304,6 +308,15 @@ mod tests {
             .await?;
         let ldbc_page_rank = get_ldbc_pr_results(test_dataset).await?;
 
+        // The result must contain exactly the same number of rows as the LDBC
+        // ground truth: a vertex silently dropped along the way (e.g. a
+        // zero-out-degree sink) would otherwise never be compared below.
+        assert_eq!(
+            calculated_page_rank.clone().count().await?,
+            ldbc_page_rank.clone().count().await?,
+            "result row count must match the LDBC ground truth row count"
+        );
+
         let comparison_df = calculated_page_rank
             .join(
                 ldbc_page_rank,
@@ -348,6 +361,15 @@ mod tests {
             .await?;
         let ldbc_page_rank = get_ldbc_pr_results(test_dataset).await?;
 
+        // The result must contain exactly the same number of rows as the LDBC
+        // ground truth: a vertex silently dropped along the way (e.g. a
+        // zero-out-degree sink) would otherwise never be compared below.
+        assert_eq!(
+            calculated_page_rank.clone().count().await?,
+            ldbc_page_rank.clone().count().await?,
+            "result row count must match the LDBC ground truth row count"
+        );
+
         let comparison_df = calculated_page_rank
             .join(
                 ldbc_page_rank,
@@ -361,6 +383,103 @@ mod tests {
 
         // No pagerank should differ from the LDBC reference by more than 0.01.
         assert_eq!(comparison_df.count().await?, 0);
+
+        Ok(())
+    }
+
+    /// Builds a tiny in-memory graph from vertex ids and (src, dst) edge pairs.
+    fn create_graph(vertices: Vec<i64>, edges: Vec<(i64, i64)>) -> Result<GraphFrame> {
+        let vertices_df = dataframe!(VERTEX_ID => Vec::<i64>::from(vertices))?;
+        let edges_df = dataframe!(
+            EDGE_SRC => Vec::<i64>::from(edges.iter().map(|(s, _)| *s).collect::<Vec<i64>>()),
+            EDGE_DST => Vec::<i64>::from(edges.iter().map(|(_, d)| *d).collect::<Vec<i64>>()),
+        )?;
+        Ok(GraphFrame {
+            vertices: vertices_df,
+            edges: edges_df,
+        })
+    }
+
+    /// PageRank must handle "sinks" — vertices with incoming edges but zero outgoing
+    /// edges. Such vertices receive rank from their in-neighbors every iteration but
+    /// never emit messages, so they are genuine members of the stationary distribution
+    /// and must appear in the output.
+    ///
+    /// Regression test for the bug where the intermediate graph used by the Pregel
+    /// engine was built from `GraphFrame::out_degrees(false)`, which aggregates *edges*
+    /// grouped by source. Vertices with out-degree 0 never appear in that aggregation,
+    /// so they were silently dropped from the vertex set, from every Pregel iteration,
+    /// and from the final output. The masses they should have accumulated were also
+    /// lost, skewing the ranks of the remaining vertices.
+    ///
+    /// Graph under test (vertex 4 is the sink, with two incoming edges):
+    ///   1 -> 2 -> 4
+    ///   1 -> 3 -> 4
+    ///
+    /// Expected values are the exact stationary distribution of PageRank with
+    /// alpha = 0.85 (reset_prob = 0.15), normalized to sum to 1 — the same convention
+    /// as the LDBC reference used by `test_pagerank_run` (verified analytically:
+    /// sinks either absorbing or teleporting mass uniformly yield the same result
+    /// after normalization). Values computed by solving the linear system
+    /// PR = (1 - alpha)/N + alpha * P^T PR.
+    #[tokio::test]
+    async fn test_pagerank_with_sink_vertices() -> Result<()> {
+        // Vertex 4 is a sink: two incoming edges, zero outgoing edges.
+        let graph = create_graph(vec![1, 2, 3, 4], vec![(1, 2), (1, 3), (2, 4), (3, 4)])?;
+
+        let (ctx, checkpoint_dir, output_uri, _guard) = setup("pagerank_sink")?;
+        graph
+            .pagerank()
+            .max_iter(14)
+            .reset_prob(0.15)
+            .set_checkpoint_dir(checkpoint_dir)
+            .run(&ctx, &output_uri, false)
+            .await?;
+
+        let calculated_page_rank = ctx
+            .read_parquet(&output_uri, ParquetReadOptions::default())
+            .await?;
+
+        // Every vertex of the graph must survive to the output — in particular the
+        // sink (vertex 4), which the bug drops entirely.
+        assert_eq!(
+            calculated_page_rank.clone().count().await?,
+            4,
+            "output must contain all 4 vertices, including the sink (vertex 4)"
+        );
+
+        let expected = dataframe!(
+            "vertex_id" => vec![1i64, 2i64, 3i64, 4i64],
+            "expected_pr" => vec![
+                0.1375042970f64, // vertex 1
+                0.1959436232,    // vertex 2
+                0.1959436232,    // vertex 3
+                0.4706084565,    // vertex 4 (sink)
+            ],
+        )?;
+
+        // LEFT join from the *expected* side: a vertex missing from the calculated
+        // output yields a NULL pagerank, which the filter below catches explicitly.
+        let comparison_df = expected
+            .join(
+                calculated_page_rank,
+                JoinType::Left,
+                &["vertex_id"],
+                &[VERTEX_ID],
+                None,
+            )?
+            .with_column("difference", abs(col(PAGERANK) - col("expected_pr")))?
+            .filter(
+                col("difference")
+                    .gt(lit(0.0015))
+                    .or(col(PAGERANK).is_null()),
+            )?;
+
+        assert_eq!(
+            comparison_df.count().await?,
+            0,
+            "every vertex (incl. the sink) must match the reference PageRank"
+        );
 
         Ok(())
     }
