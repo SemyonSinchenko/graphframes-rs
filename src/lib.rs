@@ -270,7 +270,13 @@ impl GraphFrame {
         let degrees = degrees.with_column_renamed(VERTEX_ID, "__degree_vid")?;
         let all_vertices = self.vertices.clone().select(vec![col(VERTEX_ID)])?;
         Ok(all_vertices
-            .join(degrees, JoinType::Left, &[VERTEX_ID], &["__degree_vid"], None)?
+            .join(
+                degrees,
+                JoinType::Left,
+                &[VERTEX_ID],
+                &["__degree_vid"],
+                None,
+            )?
             .select(vec![
                 col(VERTEX_ID),
                 coalesce(vec![col(degree_col), lit(0)]).alias(degree_col),

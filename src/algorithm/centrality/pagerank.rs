@@ -425,10 +425,7 @@ mod tests {
     #[tokio::test]
     async fn test_pagerank_with_sink_vertices() -> Result<()> {
         // Vertex 4 is a sink: two incoming edges, zero outgoing edges.
-        let graph = create_graph(
-            vec![1, 2, 3, 4],
-            vec![(1, 2), (1, 3), (2, 4), (3, 4)],
-        )?;
+        let graph = create_graph(vec![1, 2, 3, 4], vec![(1, 2), (1, 3), (2, 4), (3, 4)])?;
 
         let (ctx, checkpoint_dir, output_uri, _guard) = setup("pagerank_sink")?;
         graph
@@ -486,5 +483,4 @@ mod tests {
 
         Ok(())
     }
-
 }
