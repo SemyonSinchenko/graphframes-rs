@@ -1,11 +1,12 @@
 use crate::algorithm::pregel::{MessageDirection, pregel_default_msg, pregel_src};
-use crate::expressions::kcore_reduce;
+use crate::expressions::kcore_merge_expr;
 use crate::memory::CheckpointConfig;
 use crate::utils::symmetrize;
 use crate::{EDGE_DST, EDGE_SRC, GraphFrame, VERTEX_ID};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::error::Result;
 use datafusion::execution::object_store::ObjectStoreUrl;
+use datafusion::functions_aggregate::array_agg::array_agg;
 use datafusion::functions_aggregate::count::count;
 use datafusion::object_store::path::Path;
 use datafusion::prelude::*;
@@ -118,6 +119,10 @@ impl<'a> KCoreBuilder<'a> {
             edges: prepared_edges,
         };
 
+        // The aggregate spills only the reduced per-vertex core (O(|V|)), not
+        // the raw O(|E|) list: DataFusion splits the nested aggregate
+        // expression below, so the kcore_merge projection runs before the
+        // checkpoint write.
         let new_core = coalesce(vec![pregel_default_msg(), lit(0)]);
 
         let mut pregel_builder = prepared_graph
@@ -130,7 +135,12 @@ impl<'a> KCoreBuilder<'a> {
             // corrupt their estimates. Early stopping therefore relies on
             // the voting column alone, never on participation pruning.
             .add_message(pregel_src(KCORE), MessageDirection::SrcToDst)
-            .add_aggregate_expr(kcore_reduce(pregel_default_msg()))
+            // Nested expression: DataFusion splits `kcore_merge(array_agg(...))`
+            // into the array_agg aggregate plus a kcore_merge projection on top,
+            // so the checkpoint spill writes only the reduced O(|V|) result.
+            // `kcore_merge` is uncapped by design (see kcore_merge.rs): the cap
+            // never binds in a degree-seeded run.
+            .add_aggregate_expr(kcore_merge_expr(array_agg(pregel_default_msg())))
             // A vertex votes "still active" exactly while its core number
             // changed this iteration; the run stops once nobody changed.
             .with_vertex_voting("active", col(KCORE).not_eq(new_core.clone()))
@@ -227,7 +237,7 @@ mod tests {
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .unwrap();
-            // KCORE is Int32 (see `kcore_reduce`); vertex id stays Int64.
+            // KCORE is Int32 (see `kcore_merge`); vertex id stays Int64.
             let cores = batch
                 .column(1)
                 .as_any()
