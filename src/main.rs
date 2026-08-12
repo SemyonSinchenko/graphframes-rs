@@ -64,6 +64,26 @@ struct CommonArgs {
     #[arg(long, default_value = "dst")]
     dst_col_name: String,
 
+    /// Symmetrize the input graph after loading (add the reverse of every edge).
+    ///
+    /// Useful for algorithms defined on undirected graphs when the input stores
+    /// each edge only once (LDBC undirected datasets). Off by default: some
+    /// algorithms (e.g. PageRank) are only defined on directed graphs, and the
+    /// per-algorithm decision belongs to the caller.
+    #[arg(long)]
+    symmetrize: bool,
+
+    /// Keep the edge weight column in the graph.
+    ///
+    /// Currently no algorithm consumes edge weights, but keeping the column
+    /// makes the loaded `GraphFrame` ready for weighted algorithms (e.g. SSSP).
+    #[arg(long)]
+    weighted: bool,
+
+    /// Name of the edge weight column; only used with `--weighted`.
+    #[arg(long, default_value = "weight")]
+    weight_col_name: String,
+
     /// DataFusion spill-pool memory limit, e.g. `4G` or `512M`.
     ///
     /// A command-line value takes precedence over the environment variable.
@@ -248,9 +268,19 @@ fn build_context(
     let max_temp_file_size = parse_mem(max_temp_file_size)? as u64;
     let spill = ensure_dir(work.fs.join("df-spill"))?;
 
+    // The crate's stated default is "SMJ by default" (GraphFramesConfig::prefer_smj).
+    // DataFusion's own default is the opposite (`datafusion.optimizer.prefer_hash_join
+    // = true`), and it applies at *planning* time to every DataFrame of this session —
+    // including the pre-Pregel `out_degrees` join, which is planned under the base
+    // session (not under `scoped_ctx`). Mirror the crate default here so all joins are
+    // planned consistently; otherwise a hash-join build side over sliced aggregate
+    // output can reserve the whole memory pool (buffer-capacity accounting on
+    // batch_size-sliced group-by arrays) and exhaust a 4G pool on small graphs.
+    let gf_config = GraphFramesConfig::default();
     let config = SessionConfig::from_env()?
         .with_target_partitions(num_workers)
-        .with_option_extension(GraphFramesConfig::default());
+        .set_bool("datafusion.optimizer.prefer_hash_join", !gf_config.prefer_smj)
+        .with_option_extension(gf_config);
 
     let runtime_env = RuntimeEnvBuilder::new()
         .with_memory_pool(Arc::new(FairSpillPool::new(max_pool_mem)))
@@ -285,19 +315,33 @@ async fn build_graph(
     src_col: &str,
     dst_col: &str,
     format: Format,
+    weighted: bool,
+    weight_col_name: &str,
+    symmetrize: bool,
 ) -> Result<GraphFrame> {
     let r_vertices = read_data(ctx, vertices, format.clone()).await?;
     let r_edges = read_data(ctx, edges, format.clone()).await?;
 
     let vertices = r_vertices.select(vec![col(id_col).alias(VERTEX_ID)])?;
 
-    let edges = r_edges.select(vec![
+    let mut edge_cols = vec![
         col(src_col).alias(EDGE_SRC),
         col(dst_col).alias(EDGE_DST),
-    ])?;
+    ];
+    if weighted {
+        // Keep the weight column under its original name: no canonical name is
+        // defined yet, and no algorithm consumes it. Column selection fails
+        // with a clear DataFusion error if the input has no such column.
+        edge_cols.push(col(weight_col_name));
+    }
+    let edges = r_edges.select(edge_cols)?;
 
     let g = GraphFrame::try_new(vertices, edges)?;
-    Ok(g)
+    if symmetrize {
+        g.symmetrize()
+    } else {
+        Ok(g)
+    }
 }
 
 async fn setup(common: &CommonArgs) -> Result<(SessionContext, GraphFrame, ObjectPath)> {
@@ -319,6 +363,9 @@ async fn setup(common: &CommonArgs) -> Result<(SessionContext, GraphFrame, Objec
         &common.src_col_name,
         &common.dst_col_name,
         common.format.clone(),
+        common.weighted,
+        &common.weight_col_name,
+        common.symmetrize,
     )
     .await?;
 

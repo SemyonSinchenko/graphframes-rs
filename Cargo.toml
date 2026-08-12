@@ -30,22 +30,6 @@ snmalloc-rs = { version = "0.7", optional = true }
 default = ["cli"]
 cli = ["dep:clap", "dep:env_logger", "dep:snmalloc-rs"]
 
-[dev-dependencies]
-criterion = { version = "0.7", features = ["html_reports", "async_tokio"] }
-tokio = { version = "1", features = ["full"] }
-
-[[bench]]
-name = "pagerank_benchmark"
-harness = false # To disable Rust's default benchmarking and use the Criterion one
-
-[[bench]]
-name = "cc_benchmark"
-harness = false
-
-[[bench]]
-name = "sp_benchmark"
-harness = false
-
 [[bin]]
 name = "graphframes"
 path = "src/main.rs"
