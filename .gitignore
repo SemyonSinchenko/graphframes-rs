@@ -16,9 +16,9 @@ gf_checkpoints*
 gf_workdir*
 test-test*
 .#*
-graph500*
-wiki-Talk*
-twitter_mpi*
+/graph500*
+/wiki-Talk*
+/twitter_mpi*
 
 
 # Development scratch files at the repo root (benches/results/** must stay tracked)
