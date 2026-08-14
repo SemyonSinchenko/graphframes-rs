@@ -279,7 +279,10 @@ fn build_context(
     let gf_config = GraphFramesConfig::default();
     let config = SessionConfig::from_env()?
         .with_target_partitions(num_workers)
-        .set_bool("datafusion.optimizer.prefer_hash_join", !gf_config.prefer_smj)
+        .set_bool(
+            "datafusion.optimizer.prefer_hash_join",
+            !gf_config.prefer_smj,
+        )
         .with_option_extension(gf_config);
 
     let runtime_env = RuntimeEnvBuilder::new()
@@ -324,10 +327,7 @@ async fn build_graph(
 
     let vertices = r_vertices.select(vec![col(id_col).alias(VERTEX_ID)])?;
 
-    let mut edge_cols = vec![
-        col(src_col).alias(EDGE_SRC),
-        col(dst_col).alias(EDGE_DST),
-    ];
+    let mut edge_cols = vec![col(src_col).alias(EDGE_SRC), col(dst_col).alias(EDGE_DST)];
     if weighted {
         // Keep the weight column under its original name: no canonical name is
         // defined yet, and no algorithm consumes it. Column selection fails
@@ -337,11 +337,7 @@ async fn build_graph(
     let edges = r_edges.select(edge_cols)?;
 
     let g = GraphFrame::try_new(vertices, edges)?;
-    if symmetrize {
-        g.symmetrize()
-    } else {
-        Ok(g)
-    }
+    if symmetrize { g.symmetrize() } else { Ok(g) }
 }
 
 async fn setup(common: &CommonArgs) -> Result<(SessionContext, GraphFrame, ObjectPath)> {
