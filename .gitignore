@@ -29,3 +29,4 @@ test-test*
 
 # Python things
 __pycache__
+/benches/python/.lbdb-venv/

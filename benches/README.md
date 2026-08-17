@@ -86,6 +86,71 @@ The runner hardcodes LDBC-inspired parameters (no properties/manifest files):
 graphs (ignored), WCC/KCore/MIS and ClassicalLP symmetrize internally
 (ignored), and shortest-path + hyperanf get a symmetrized input.
 
+## Reference benchmark: in-memory CSR (icebug)
+
+To quantify what the out-of-core mode costs relative to a plain in-memory
+CSR engine, `main_lbdb.py` re-runs the same LDBC flow with the reference
+stack recommended by the [icebug](https://github.com/Ladybug-Memory/icebug)
+developers (icebug = a NetworKit fork over zero-copy Arrow CSR arrays):
+
+    pyarrow read -> IcebugMemGraph.from_arrow_tables(nodes, rels)
+    -> nk.graph.Graph (fromCSR / fromIcebugMemGraph, zero-copy) -> algorithm
+    -> parquet result
+
+Files:
+
+    benches/python/main_lbdb.py        # runner: same CLI, monitor, stats and
+                                       # report layout as main.py
+    benches/python/lbdb_algorithms.py  # worker: one cold process per run,
+                                       #   read -> CSR -> graph -> algorithm
+                                       #   -> result.parquet, plus a phase
+                                       #   timing report
+    benches/python/lbdb-requirements.txt  # icebug==12.9, icebug-format[convert-duckdb], pyarrow
+
+Usage (the runner creates `benches/python/.lbdb-venv` on demand via `uv`,
+or pass `--python <interpreter>` with the requirements pre-installed):
+
+    python3 benches/python/main_lbdb.py                       # wiki-Talk (2XS) smoke test
+    python3 benches/python/main_lbdb.py --dataset cit-Patents --runs 5
+
+Reports land next to the graphframes results, following the same
+`<algorithm>/<size-class>/<dataset>/<knob>/` structure:
+
+    benches/results/ldbd/<algorithm>/<size-class>/<dataset>/icebug_threads_<n>/
+
+`icebug_threads_<n>` is the reference counterpart of
+`max_mem_<mem>_workers_<n>`: it records the OpenMP thread count of the
+NetworKit core instead of DataFusion memory/worker knobs. The JSON adds an
+`engine: icebug` field, the reference package versions under
+`environment.ref_*`, and per-run `worker` phase timings (`import_s`,
+`read_parquet_s`, `csr_and_graph_s`, `algorithm_s`, `write_parquet_s`) so
+interpreter/CSF overhead can be separated from pure algorithm time when
+comparing with graphframes.
+
+Algorithm mapping (parameters mirror the table above):
+
+| algorithm | graphframes CLI | reference (NetworKit) | notes |
+|---|---|---|---|
+| pagerank | `page-rank --max-iter 10` | `centrality.PageRank`, damp 0.85, `maxIterations=10`, `tol=0` | fixed 10-iteration budget on both sides; the directed zero-copy graph gets its in-edge CSR from a second transposed `from_arrow_tables` call (icebug's CSR graph only stores out-adjacency) |
+| wcc | `wcc --seed 42` | `components.ParallelConnectedComponents` (parallel label propagation) | both symmetrize the input internally with duplicates kept |
+| cdlp | `classical-lp --max-iter 10` | `community.PLP`, `maxIterations=10` | both on the symmetrized undirected graph; PLP breaks label ties randomly while LDBC CDLP picks the smallest label, and PLP may stop before the cap once labels stabilize — partitions can therefore differ slightly from the LDBC reference while the workload stays comparable |
+
+Semantic caveats worth remembering when reading the numbers:
+
+* measured wall time is the whole cold process (interpreter start + imports
+  + parquet read + DuckDB CSR build + zero-copy graph + algorithm + write),
+  exactly like main.py times a cold `graphframes` process;
+* `IcebugMemGraph.from_arrow_tables` materializes the CSR with DuckDB SQL —
+  on wiki-Talk that conversion is ~2/3 of the total runtime, which is the
+  honest cost of the recommended "parquet in, CSR out" flow;
+* for WCC/CDLP the reference keeps self-loops once (icebug) while graphframes
+  drops them during symmetrization; PageRank on both sides uses the raw
+  directed edges.
+
+On wiki-Talk (2XS, 2.4M vertices / 5.0M edges, 12 threads) the smoke run
+gives: pagerank ≈ 4.3 s, wcc ≈ 3.0 s, cdlp ≈ 4.3 s wall per cold run at
+~1.2–1.7 GiB peak RSS (see `results/ldbd/*/2XS/wiki-Talk/icebug_threads_12/`).
+
 ## Monitoring notes
 
 * RSS sampling reads `/proc/<pid>/status` (`VmRSS` per poll, `VmHWM` for the
