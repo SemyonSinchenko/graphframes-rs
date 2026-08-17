@@ -5,14 +5,6 @@
 #   uv venv benches/python/.lbdb-venv
 #   uv pip install -r benches/python/lbdb-requirements.txt -p benches/python/.lbdb-venv/bin/python
 #
-# icebug: networkit fork with the zero-copy Arrow CSR graph
-# (nk.graph.Graph.fromIcebugMemGraph / fromCSR).  Pinned to 12.9: the 13.0
-# release reworked centrality.PageRank and dropped the maxIterations
-# property that this benchmark needs to mirror graphframes' fixed
-# `--max-iter 10` budget.
-icebug==12.9
-# IcebugMemGraph.from_arrow_tables (parquet -> CSR conversion); the
-# convert-duckdb extra provides the duckdb engine it runs on.
-icebug-format[convert-duckdb]>=1.0.0
-# parquet I/O; bound kept in sync with icebug 12.9 (pyarrow<25).
-pyarrow>=24,<25
+icebug==13.0
+icebug-format[convert-duckdb]>=1.0.1
+pyarrow==25.0.0

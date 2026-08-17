@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 
@@ -76,6 +77,61 @@ PAGERANK_MAX_ITER = 10  # graphframes: --max-iter 10
 PAGERANK_TOL = 0.0      # disable convergence: fixed iteration budget,
                         # exactly like the graphframes fixed-budget mode
 CDLP_MAX_ITER = 10      # graphframes: classical-lp --max-iter 10
+
+
+def parse_memory(s: str) -> int:
+    """Parse '8G' / '8GiB' / '512MB' / '4096' into bytes (binary units)."""
+    s = str(s).strip()
+    mult = 1
+    suffixes = {"K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+    body = s.upper().rstrip("B")          # drop an optional trailing B
+    if body and body[-1] in suffixes:
+        mult = suffixes[body[-1]]
+        body = body[:-1].rstrip("I")      # drop an optional binary I (KiB)
+    value = float(body)
+    if value <= 0:
+        raise ValueError(f"memory limit must be positive, got {s!r}")
+    return int(value * mult)
+
+
+def configure_duckdb(max_memory: str | None, temp_dir: str | None,
+                     threads: int | None) -> dict:
+    """Make every DuckDB connection the CSR conversion opens obey the knobs.
+
+    icebug_format.memory calls `duckdb.connect()` with no arguments, so the
+    only injection point is the `connect` attribute of the duckdb module
+    itself (it imports duckdb lazily at call time and therefore picks the
+    wrapper up).  Returns the effective config dict for the report.
+
+    memory_limit bounds DuckDB's buffer manager: overflowing sorts/hash
+    tables spill to `temp_directory`, and blocks of the in-memory tables
+    (`CREATE TABLE relations AS ...`) are evicted there too, so a limit
+    turns the conversion from "grow until the OS OOM-killer reacts" into a
+    bounded-memory, disk-spilling pipeline.
+    """
+    import duckdb
+
+    cfg: dict = {}
+    if max_memory:
+        cfg["memory_limit"] = f"{parse_memory(max_memory) // (1024 ** 2)}MB"
+    if temp_dir:
+        os.makedirs(temp_dir, exist_ok=True)
+        cfg["temp_directory"] = temp_dir
+    if threads:
+        cfg["threads"] = int(threads)
+    if not cfg:
+        return {}
+
+    original_connect = duckdb.connect
+
+    def _connect(*args, **kwargs):
+        merged = dict(cfg)
+        # a caller-provided config wins per key (none is passed today)
+        merged.update(kwargs.pop("config", {}) or {})
+        return original_connect(*args, config=merged, **kwargs)
+
+    duckdb.connect = _connect
+    return cfg
 
 
 def _single_u64_array(x):
@@ -135,9 +191,13 @@ def run_algorithm(name: str, g, max_iter: int | None = None, damp: float = PAGER
     if name == "pagerank":
         pr = NK.centrality.PageRank(g, damp=damp, tol=tol)
         if not hasattr(type(pr), "maxIterations"):
+            # defensive: the property exists in icebug 12.9 and 13.x
+            # (networkit/centrality.pyx:2646); a missing property means the
+            # installed fork changed shape and the fixed-iteration contract
+            # with graphframes' --max-iter 10 cannot be honoured
             raise RuntimeError(
-                "icebug PageRank has no maxIterations property (removed in "
-                "icebug 13.0); pin icebug==12.9 in lbdb-requirements.txt")
+                "the installed icebug PageRank has no maxIterations property; "
+                "cannot mirror graphframes' fixed --max-iter budget")
         pr.maxIterations = max_iter if max_iter is not None else PAGERANK_MAX_ITER
         t0 = time.perf_counter()
         pr.run()
@@ -198,13 +258,22 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=42,
                    help="NetworKit RNG seed (PLP tie-breaking), mirrors graphframes --seed")
     p.add_argument("--threads", type=int, default=None,
-                   help="NetworKit/OpenMP thread count (default: all cores)")
+                   help="NetworKit/OpenMP and DuckDB thread count (default: all cores)")
+    p.add_argument("--max-memory", default=None,
+                   help="DuckDB memory limit for the CSR conversion, e.g. 8G or 512MB "
+                        "(same syntax as graphframes --max-memory). Bounds the buffer "
+                        "manager so the conversion spills instead of OOMing; default: "
+                        "DuckDB's own default (80%% of RAM)")
+    p.add_argument("--temp-dir", default=None,
+                   help="DuckDB spill directory (created if missing); point it inside "
+                        "the benchmark workdir so the disk monitor sees the spill")
     p.add_argument("--report", default=None, help="write the JSON report to this file")
     args = p.parse_args(argv)
 
     NK.setSeed(args.seed, True)
     if args.threads:
         NK.setNumberOfThreads(args.threads)
+    duckdb_cfg = configure_duckdb(args.max_memory, args.temp_dir, args.threads)
 
     phases = {}
     wall0 = time.perf_counter()
@@ -243,6 +312,7 @@ def main(argv=None) -> int:
         "directed": directed,
         "iterations": n_iters,
         "omp_threads": NK.getMaxNumberOfThreads(),
+        "duckdb": duckdb_cfg,
         "phases_s": phases,
         "import_s": IMPORT_TIME,
         **extra,

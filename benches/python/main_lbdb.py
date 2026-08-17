@@ -16,13 +16,13 @@ module, and writes the same report layout as ``main.py``:
     <results-dir>/ldbd/<algorithm>/<size-class>/<dataset>/icebug_threads_<n>/
         benchmark.json + wall_time/rss/disk .dat/.gnuplot/.png
 
-The `icebug_threads_<n>` leaf plays the role of graphframes'
-`max_mem_<mem>_workers_<n>`: it records the knob of the measured engine
-(OpenMP thread count of the NetworKit C++ core).
+The results leaf plays the role of graphframes' `max_mem_<mem>_workers_<n>`:
+`icebug_threads_<n>` by default, or `icebug_mem_<mem>_threads_<n>` when
+`--max-memory` is given.
 
 Algorithms and parameters mirror ``main.py``:
 
-    pagerank  PageRank, damp 0.85, exactly 10 iterations (icebug 12.9's
+    pagerank  PageRank, damp 0.85, exactly 10 iterations (icebug's
               PageRank.maxIterations property = graphframes --max-iter 10)
     wcc       weakly connected components via parallel label propagation
               (nk ParallelConnectedComponents) on the symmetrized graph
@@ -101,7 +101,13 @@ def parse_args() -> argparse.Namespace:
                    help="python interpreter with the lbdb-requirements.txt deps "
                         f"(default: {DEFAULT_VENV}/bin/python, created on demand)")
     p.add_argument("--threads", type=int, default=None,
-                   help="NetworKit/OpenMP threads per run (default: all cores)")
+                   help="NetworKit/OpenMP and DuckDB threads per run (default: all cores)")
+    p.add_argument("--max-memory", default=None,
+                   help="DuckDB memory limit for the CSR conversion, e.g. 8G "
+                        "(same syntax as main.py --max-memory). Forces the "
+                        "conversion to spill to disk instead of OOMing; the "
+                        "results leaf becomes icebug_mem_<mem>_threads_<n>. "
+                        "Default: none (DuckDB default = 80%% of RAM)")
     p.add_argument("--seed", type=int, default=42, help="NetworKit RNG seed (mirrors --seed 42)")
     p.add_argument("--target-samples", type=int, default=300,
                    help="target number of monitor samples per measured run")
@@ -220,6 +226,11 @@ def make_command(py: Path, algo: str, dataset: str, info: dict, args: argparse.N
         cmd += ["--max-iter", str(conf["max_iter"])]
     if args.threads:
         cmd += ["--threads", str(args.threads)]
+    # spill location inside the run workdir: the du-mode disk monitor walks
+    # the whole workdir tree, so DuckDB spill files show up in the disk curve
+    cmd += ["--temp-dir", str(run_workdir / "duckdb_tmp")]
+    if args.max_memory:
+        cmd += ["--max-memory", args.max_memory]
     return cmd
 
 
@@ -238,8 +249,9 @@ def _worker_report(run_workdir: Path) -> dict | None:
 def run_algorithm(py: Path, versions: dict, algo: str, dataset: str, info: dict,
                   args: argparse.Namespace, results_root: Path) -> None:
     threads = args.threads or versions["max_threads"]
-    run_dir = (results_root / args.results_subdir / algo / info["scale"] / dataset /
-               f"icebug_threads_{threads}")
+    leaf = (f"icebug_mem_{args.max_memory}_threads_{threads}" if args.max_memory
+            else f"icebug_threads_{threads}")
+    run_dir = (results_root / args.results_subdir / algo / info["scale"] / dataset / leaf)
     run_dir.mkdir(parents=True, exist_ok=True)
     workdir = Path(args.checkpoint_dir) / f"lbdb_{algo}_{dataset}"
     workdir.mkdir(parents=True, exist_ok=True)
@@ -308,6 +320,7 @@ def run_algorithm(py: Path, versions: dict, algo: str, dataset: str, info: dict,
         "engine": "icebug",
         "params": {
             "icebug_threads": threads,
+            "duckdb_max_memory": args.max_memory,
             "seed": args.seed,
             "runs": args.runs,
             "warmup": 1,
@@ -316,7 +329,6 @@ def run_algorithm(py: Path, versions: dict, algo: str, dataset: str, info: dict,
             "disk_mode": args.disk_mode,
             "max_iter": ALGORITHMS[algo]["max_iter"],
             "symmetrized_input": ALGORITHMS[algo]["symmetrize"],
-            "worker_args": ("--max-iter 10" if ALGORITHMS[algo]["max_iter"] else ""),
         },
         "graph": {
             "vertices": info["vertices"],
@@ -351,7 +363,9 @@ def run_algorithm(py: Path, versions: dict, algo: str, dataset: str, info: dict,
         json.dump(payload, f, indent=2)
 
     # --- plots ---
-    title = (f"icebug {algo} / {dataset} ({info['scale']}) — threads_{threads}")
+    title = (f"icebug {algo} / {dataset} ({info['scale']}) — "
+             + (f"mem_{args.max_memory}_" if args.max_memory else "")
+             + f"threads_{threads}")
     plotting.write_wall_time(run_dir, title, times, time_stats)
     if series is not None:
         grid = [i / (series["grid_size"] - 1) for i in range(series["grid_size"])]
