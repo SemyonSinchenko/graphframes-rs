@@ -104,28 +104,67 @@ Files:
     benches/python/lbdb_algorithms.py  # worker: one cold process per run,
                                        #   read -> CSR -> graph -> algorithm
                                        #   -> result.parquet, plus a phase
-                                       #   timing report
-    benches/python/lbdb-requirements.txt  # icebug==12.9, icebug-format[convert-duckdb], pyarrow
+                                       #   timing report; applies the DuckDB
+                                       #   memory cap / spill dir / threads
+    benches/python/lbdb-requirements.txt  # icebug==13.0, icebug-format[convert-duckdb], pyarrow
 
 Usage (the runner creates `benches/python/.lbdb-venv` on demand via `uv`,
 or pass `--python <interpreter>` with the requirements pre-installed):
 
     python3 benches/python/main_lbdb.py                       # wiki-Talk (2XS) smoke test
     python3 benches/python/main_lbdb.py --dataset cit-Patents --runs 5
+    python3 benches/python/main_lbdb.py --dataset graph500-24 --threads 4 --max-memory 8G
 
 Reports land next to the graphframes results, following the same
 `<algorithm>/<size-class>/<dataset>/<knob>/` structure:
 
     benches/results/ldbd/<algorithm>/<size-class>/<dataset>/icebug_threads_<n>/
+    benches/results/ldbd/<algorithm>/<size-class>/<dataset>/icebug_mem_<mem>_threads_<n>/
 
-`icebug_threads_<n>` is the reference counterpart of
-`max_mem_<mem>_workers_<n>`: it records the OpenMP thread count of the
-NetworKit core instead of DataFusion memory/worker knobs. The JSON adds an
-`engine: icebug` field, the reference package versions under
-`environment.ref_*`, and per-run `worker` phase timings (`import_s`,
-`read_parquet_s`, `csr_and_graph_s`, `algorithm_s`, `write_parquet_s`) so
-interpreter/CSF overhead can be separated from pure algorithm time when
+The leaf is the reference counterpart of `max_mem_<mem>_workers_<n>`: it
+records the knobs of the measured engine — the OpenMP thread count of the
+NetworKit core, plus the DuckDB memory cap when `--max-memory` is given.
+The JSON adds an `engine: icebug` field, the reference package versions
+under `environment.ref_*`, and per-run `worker` phase timings (`import_s`,
+`read_parquet_s`, `csr_and_graph_s`, `algorithm_s`, `write_parquet_s`) plus
+the effective `duckdb` config (`memory_limit`, `temp_directory`, `threads`),
+so interpreter/CSR overhead can be separated from pure algorithm time when
 comparing with graphframes.
+
+### Reference memory control (`--max-memory`)
+
+The CSR conversion inside `IcebugMemGraph.from_arrow_tables` runs on
+DuckDB, whose default `memory_limit` is 80% of RAM. On M-class graphs that
+default does not force spilling early enough and the process dies at the
+OS level: on graph500-24 (8.87M vertices / 260.4M edges) the *directed*
+pagerank build (two `from_arrow_tables` passes over m rows) peaked at
+**23.2 GiB RSS** with a DuckDB working set of ~15–19 GiB through the CSR
+builds (see `ldbd/pagerank/M/graph500-24/icebug_threads_4/`), while the
+*symmetrized* wcc/cdlp builds (one pass over ~2m rows — a 7.7 GiB relation
+table, 3.9 GiB index output) roughly double that working set and get
+OOM-killed before NetworKit ever runs.
+
+`--max-memory` caps DuckDB via its `memory_limit` (injected into the
+connections the library opens, see `lbdb_algorithms.py`), which makes the
+conversion a bounded-memory pipeline: overflowing sorts spill and the
+in-memory relation-table blocks are evicted into `temp_directory` — the
+runner points that at `<workdir>/run_<i>/duckdb_tmp`, so the spill shows up
+in the du-mode disk curve. `--threads` is applied to NetworKit *and*
+DuckDB, so one knob describes the whole run. Sizing from the graph500-24
+numbers (unavoidable pyarrow-resident memory is ~4 GiB of input + ~4 GiB
+of CSR output + interpreter on top of the cap):
+
+| cap | expected effect on M-class |
+|---|---|
+| none (DuckDB default ≈ 80% RAM) | pagerank peaks ~23 GiB; wcc/cdlp OOM |
+| `--max-memory 12G` | relation table fully resident + sort headroom, moderate spill — fastest survivable setting |
+| `--max-memory 8G` | relation table ~resident, sorts spill; peak RSS ≈ cap + ~9 GiB — recommended default for a shared ~38 GiB box |
+| `--max-memory 4G` | matches graphframes' default spill pool; the 7.7 GiB relation table churns and re-reads constantly — slow but very safe |
+
+Verified on wiki-Talk with an intentionally tiny cap (`--max-memory 128M`):
+the run succeeds, spills ~150 MB into the workdir (visible in the disk
+curve), RSS drops from 1.3 to 0.9 GiB, the CSR phase slows 3.4s → 5.7s,
+and the resulting PageRank is bit-identical to the uncapped run.
 
 Algorithm mapping (parameters mirror the table above):
 
@@ -147,9 +186,13 @@ Semantic caveats worth remembering when reading the numbers:
   drops them during symmetrization; PageRank on both sides uses the raw
   directed edges.
 
-On wiki-Talk (2XS, 2.4M vertices / 5.0M edges, 12 threads) the smoke run
-gives: pagerank ≈ 4.3 s, wcc ≈ 3.0 s, cdlp ≈ 4.3 s wall per cold run at
-~1.2–1.7 GiB peak RSS (see `results/ldbd/*/2XS/wiki-Talk/icebug_threads_12/`).
+On wiki-Talk (2XS, 2.4M vertices / 5.0M edges, 12 threads, icebug 13.0)
+the smoke run gives: pagerank ≈ 4.8 s, wcc ≈ 3.2 s, cdlp ≈ 4.6 s wall per
+cold run at ~1.3–1.7 GiB peak RSS (see
+`results/ldbd/*/2XS/wiki-Talk/icebug_threads_12/`). On graph500-24 (M,
+--threads 4) pagerank needs ~188 s per run, 84% of it in the CSR
+conversion itself — the honest price of the recommended parquet→CSR flow
+(see `results/ldbd/pagerank/M/graph500-24/icebug_threads_4/`).
 
 ## Monitoring notes
 
