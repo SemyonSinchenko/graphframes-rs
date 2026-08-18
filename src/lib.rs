@@ -2,6 +2,7 @@ mod algorithm;
 mod expressions;
 mod memory;
 mod utils;
+mod ml;
 
 pub use utils::GraphFramesConfig;
 

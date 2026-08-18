@@ -3,6 +3,7 @@ mod finite_axpb;
 mod hll;
 mod kcore_merge;
 mod most_common;
+mod kmeans_step;
 
 pub(crate) use finite_axpb::{axpb, finite_axpb};
 pub(crate) use hll::{hll_long, hll_long_aggregate, hll_long_estimate, hll_long_union};
