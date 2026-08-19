@@ -16,13 +16,16 @@ gf_checkpoints*
 gf_workdir*
 test-test*
 .#*
-graph500*
-wiki-Talk*
-twitter_mpi*
+/graph500*
+/wiki-Talk*
+/twitter_mpi*
 
 
-# Some things I'm using in development
-*.gnuplot
-*.txt
-watch_size.sh
-*.png
+# Development scratch files at the repo root (benches/results/** must stay tracked)
+/*.gnuplot
+/*.txt
+/watch_size.sh
+/*.png
+
+# Python things
+__pycache__

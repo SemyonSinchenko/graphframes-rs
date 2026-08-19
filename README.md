@@ -28,6 +28,15 @@ graphframes page-rank \
 
 Vertices must contain an Int64 `id` column; edges must contain Int64 `src` and `dst` columns. If your input uses different names, map them with `--id-col-name`, `--src-col-name`, and `--dst-col-name`. The input format defaults to parquet; `--format csv` and `--format json` are also available.
 
+Two input-adjacent flags exist: `--symmetrize` adds the reverse of every edge
+after loading (for algorithms defined on undirected graphs whose input stores
+each edge only once, e.g. LDBC undirected datasets — note that PageRank is
+only defined on directed graphs, so symmetrizing is a per-algorithm decision
+for the caller), and `--weighted` keeps the edge weight column (`--weight-col-name`,
+default `weight`) in the graph. No algorithm consumes weights yet, but keeping
+the column makes the loaded graph ready for the upcoming weighted algorithms
+(e.g. SSSP).
+
 Available algorithms:
 
 - `page-rank`: PageRank centrality;
