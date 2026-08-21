@@ -1,8 +1,8 @@
 mod algorithm;
 mod expressions;
 mod memory;
-mod utils;
 mod ml;
+mod utils;
 
 pub use utils::GraphFramesConfig;
 
@@ -20,6 +20,8 @@ pub const EDGE_SRC: &str = "src";
 pub const EDGE_DST: &str = "dst";
 /// Column names for the edge column in triplet representation.
 pub const EDGE_COL: &str = "edge";
+/// Column names for edge weights
+pub const EDGE_WEIGHT: &str = "weight";
 /// Column names for the source vertex in triplet representation.
 pub const SRC_VERTEX: &str = "src_vertex";
 /// Column names for the destination vertex in triplet representation.
