@@ -19,6 +19,7 @@ futures = "0.3"
 uuid = {version = "1", features = ["v4"] }
 log = "0.4"
 rand = { version = "0.9", features = ["std_rng"] }
+wide = "0.7"
 datasketches = { version = "0.3.0", default-features = false, features = ["hll"] }
 
 # CLI dependencies
