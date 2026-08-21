@@ -86,6 +86,93 @@ The runner hardcodes LDBC-inspired parameters (no properties/manifest files):
 graphs (ignored), WCC/KCore/MIS and ClassicalLP symmetrize internally
 (ignored), and shortest-path + hyperanf get a symmetrized input.
 
+## Reference benchmark: Spark GraphFrames (local mode)
+
+The third leg of the comparison is the reference *distributed* engine the
+project is named after: Apache Spark + GraphFrames (the `graphframes-rs`
+name is a play on this stack). `main_graphframe.py` runs the same LDBC flow
+with one local SparkSession per algorithm:
+
+    spark.read.parquet -> GraphFrame(vertices, edges) -> algorithm
+    -> result.parquet
+
+Files:
+
+    benches/python/main_graphframe.py      # runner: same CLI, monitor, stats and
+                                           # report layout as main.py/main_lbdb.py
+    benches/python/lbdb-requirements.txt   # adds pyspark==4.1.2 + graphframes-py==0.12.1
+
+Stack (pinned): pyspark/spark **4.1.2** (the version GraphFrames 0.12.1
+targets — its POM depends on spark-sql_2.13:4.1.2), graphframes-py **0.12.1**
+and the JVM jar `io.graphframes:graphframes-spark4_2.13:0.12.1`, resolved by
+Spark via `--packages` (`spark.jars.packages`) at session-creation time
+(first run downloads it from Maven Central; later runs use the Ivy cache).
+The session is created **before** any measurement — the runner then wraps
+each algorithm run in the shared monitor, so session/JVM startup and jar
+download are never part of the reported wall time.
+
+GraphFrames is slow, so the defaults are the opposite of the other runners:
+**no warmup, 3 runs** (`--warmup 1` restores the discarded calibration run).
+
+Usage (the runner bootstraps `benches/python/.lbdb-venv` from
+`lbdb-requirements.txt` on demand, or pass an interpreter that has them):
+
+    python3 benches/python/main_graphframe.py                       # wiki-Talk (2XS) smoke test
+    python3 benches/python/main_graphframe.py --dataset cit-Patents --runs 5
+    python3 benches/python/main_graphframe.py --dataset wiki-Talk \
+        --algorithms pagerank,wcc,cdlp,sssp --max-memory 8G --num-workers 8 \
+        --storage-level disk --gf-version 0.12.1
+
+Reports land next to the other two runners' results:
+
+    benches/results/gf/<algorithm>/<size-class>/<dataset>/
+        spark_driver_<mem>_shuffle_<n>_storage_<memory|disk>/
+            benchmark.json + wall_time/rss/disk .gnuplot/.png
+
+### Knobs
+
+| flag | Spark setting | notes |
+|---|---|---|
+| `--max-memory` | `spark.driver.memory` | local mode: one JVM holds driver + executors |
+| `--num-workers` | `spark.sql.shuffle.partitions` | master is `local[*]`, so all cores are used; give it at least 4 |
+| `--storage-level` | `StorageLevel` passed to the algorithms | `memory` -> `MEMORY_AND_DISK` (default), `disk` -> `DISK_ONLY` (wcc/cdlp/sssp; PageRank has no storage-level knob) |
+| `--gf-version` | `spark.jars.packages` | selects the jar `io.graphframes:graphframes-spark4_2.13:<version>` (default 0.12.1) |
+
+Per run the workdir tree is watched by the shared monitor (RSS is summed
+over the process tree, so the driver JVM is included in `peak_rss_kb`; disk
+is the workdir tree, so Spark's shuffle spill under `spark_local` and the
+`spark_checkpoints` folder show up in the disk curve):
+
+    <checkpoint-dir>/gf_<algo>_<dataset>/
+        spark_local/                  spark.local.dir (shuffle/block spill)
+        run_<i>/spark_checkpoints/    sc.setCheckpointDir() target
+        run_<i>/output/result.parquet algorithm result
+
+### Algorithm mapping
+
+The session and algorithm configuration follow the official GraphFrames
+benchmark (https://graphframes.io/01-about/03-benchmarks.html):
+KryoSerializer, local (in-executor) checkpoints, raw directed edges.
+
+| algorithm | GraphFrames call | notes |
+|---|---|---|
+| pagerank | `pageRank(resetProbability=0.15, maxIter=10)` | the GraphX implementation (the only one exposed); mirrors `page-rank --max-iter 10` (damping 0.85) |
+| wcc | `connectedComponents(algorithm="randomized_contraction")` | fastest of the four CC implementations; symmetrizes internally and writes intermediate tables to the per-run `spark_checkpoints` folder |
+| cdlp | `labelPropagation(maxIter=10, algorithm="graphframes")` | GraphFrames pregel implementation (faster than GraphX here); run on the raw directed edges like the official benchmark — **not** symmetrized, because the pregel aggregates messages by receiver and the LDBC bidirectional semantic would be O(degree x labels) per receiver (~25x slower on degree-skewed graphs like wiki-Talk, max out-degree 100k vs max in-degree 3k) |
+| sssp | `shortestPaths(landmarks=[0.25 * vertices], algorithm="graphframes")` | landmark = 25th percentile vertex id (main.py convention); GraphFrames implementation, faster than GraphX on large graphs |
+
+The JSON adds `engine: spark-graphframes`, the Spark/python/java versions and
+jar coordinates under `environment`, per-run `worker` phase timings
+(`read_parquet_s`, `graph_build_s`, `algorithm_s`, `write_parquet_s`) plus
+the effective params (`shuffle_partitions`, `driver_memory`, `storage_level`,
+`impl`, `symmetrized_input`, `use_local_checkpoints`).
+
+On wiki-Talk (2XS, 2M vertices / 5M edges, local[*] on a 12-core box, 4G
+driver, Kryo, local checkpoints) the smoke run gives roughly: pagerank
+~30 s, wcc ~30 s, cdlp ~66 s, sssp ~44 s wall per cold run at ~5 GiB peak
+RSS — matching the official GraphFrames benchmark numbers (CDLP ~78 s on a
+4-core GitHub Actions runner).
+
 ## Reference benchmark: in-memory CSR (icebug)
 
 To quantify what the out-of-core mode costs relative to a plain in-memory

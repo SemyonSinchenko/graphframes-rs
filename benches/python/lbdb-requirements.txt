@@ -8,3 +8,11 @@
 icebug==13.0
 icebug-format[convert-duckdb]>=1.0.1
 pyarrow==25.0.0
+
+# Spark GraphFrames stack, used by benches/python/main_graphframe.py.  The jar
+# (io.graphframes:graphframes-spark4_2.13:<version>) is resolved by Spark at
+# session creation time via --packages / spark.jars.packages, so only the
+# Python-side packages live here.
+pyspark==4.1.2
+graphframes-py==0.12.1
+typing_extensions>=4.11
