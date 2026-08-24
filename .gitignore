@@ -29,3 +29,7 @@ test-test*
 
 # Python things
 __pycache__
+
+# I do not want to publish benchmarks from other engines except this one;
+/benches/results/gf/*
+/benches/results/ldbd/*
