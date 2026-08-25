@@ -1,16 +1,24 @@
+use datafusion::arrow::array::{AsArray, Float32Array};
 use datafusion::arrow::datatypes::DataType;
-use datafusion::common::ExprSchema;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::object_store::path::Path;
 use datafusion::prelude::*;
 use uuid::Uuid;
 
+use crate::memory::ParquetCheckpointer;
 use crate::utils::scoped_ctx;
 use crate::{
     EDGE_DST, EDGE_SRC, GraphFrame, memory::CheckpointConfig, ml::KMeansResult, utils::symmetrize,
 };
 use crate::{EDGE_WEIGHT, GraphFramesConfig};
+
+async fn ppmi(edges: &DataFrame, weight_col: &str, checkpointer: ParquetCheckpointer, ctx: &SessionContext) -> Result<DataFrame> {
+    let cached_edges = checkpointer.push(ctx, "__raw_edges", edges).await?;
+    let d_raw = cached_edges.aggregate(vec![col(EDGE_SRC)], vec![sum(col(EDGE_DST)).alias("d_raw")])?;
+    let w = d_raw.aggregate(vec![], vec![sum(col("d_raw"))])?.collect().await?.first().unwrap().column(0).as_primitive::<Float32Array>();
+    
+}
 
 #[derive(Debug, Copy, Eq, PartialEq, Hash, Clone)]
 pub enum InitStrategy {
