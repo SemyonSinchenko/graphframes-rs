@@ -1,7 +1,7 @@
 use crate::ml::linalg::{cosine_distance, l2_distance, l2_norm};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum DistanceMetric {
+pub enum DistanceMetric {
     L2,
     Cosine,
 }

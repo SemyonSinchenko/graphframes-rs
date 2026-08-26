@@ -1,2 +1,2 @@
 mod classical_lp;
-mod power_iteration_clustering;
+pub(crate) mod power_iteration_clustering;

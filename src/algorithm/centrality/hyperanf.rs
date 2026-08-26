@@ -95,6 +95,7 @@ impl<'a> HyperANFBuilder<'a> {
                     .clone()
                     .select_columns(&[EDGE_SRC, EDGE_DST])?,
                 true,
+                None,
             )?
         };
 

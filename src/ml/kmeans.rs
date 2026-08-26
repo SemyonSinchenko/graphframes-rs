@@ -51,7 +51,7 @@ fn power_expr(base: Expr, exp: Expr) -> Expr {
 /// than requested, K is clamped down, mirroring Spark returning fewer
 /// distinct candidate centers).
 #[derive(Debug, Clone)]
-pub(crate) struct KMeansRun {
+pub struct KMeansRun {
     /// Effective number of centers.
     pub k: usize,
     /// Sum over all rows of the distance to the assigned center
@@ -64,7 +64,7 @@ pub(crate) struct KMeansRun {
 
 /// Result of a [`KMeansBuilder`] run.
 #[derive(Debug, Clone)]
-pub(crate) struct KMeansResult {
+pub struct KMeansResult {
     /// Lloyd iterations executed (shared by all K values; the loop stops when
     /// every K converged or `max_iter` was reached).
     pub num_iterations: usize,
@@ -84,7 +84,7 @@ struct RunState {
 }
 
 /// Builder for an out-of-core K-Means run over a feature column.
-pub(crate) struct KMeansBuilder<'a> {
+pub struct KMeansBuilder<'a> {
     features: &'a DataFrame,
     feature_col: String,
     ks: Vec<usize>,
@@ -96,7 +96,7 @@ pub(crate) struct KMeansBuilder<'a> {
 }
 
 impl<'a> KMeansBuilder<'a> {
-    pub(crate) fn new(features: &'a DataFrame, feature_col: impl Into<String>) -> Self {
+    pub fn new(features: &'a DataFrame, feature_col: impl Into<String>) -> Self {
         Self {
             features,
             feature_col: feature_col.into(),
@@ -110,45 +110,45 @@ impl<'a> KMeansBuilder<'a> {
     }
 
     /// Requests a single K.
-    pub(crate) fn k(mut self, k: usize) -> Self {
+    pub fn k(mut self, k: usize) -> Self {
         self.ks = vec![k];
         self
     }
 
     /// Requests multiple K values; all of them share one features scan per
     /// Lloyd iteration.
-    pub(crate) fn k_values(mut self, ks: &[usize]) -> Self {
+    pub fn k_values(mut self, ks: &[usize]) -> Self {
         self.ks = ks.to_vec();
         self
     }
 
-    pub(crate) fn metric(mut self, metric: DistanceMetric) -> Self {
+    pub fn metric(mut self, metric: DistanceMetric) -> Self {
         self.metric = metric;
         self
     }
 
-    pub(crate) fn max_iter(mut self, max_iter: usize) -> Self {
+    pub fn max_iter(mut self, max_iter: usize) -> Self {
         self.max_iter = max_iter;
         self
     }
 
-    pub(crate) fn tol(mut self, tol: f64) -> Self {
+    pub fn tol(mut self, tol: f64) -> Self {
         self.tol = tol;
         self
     }
 
     /// k-means|| sampling rounds (Spark's `initializationSteps`).
-    pub(crate) fn init_steps(mut self, init_steps: usize) -> Self {
+    pub fn init_steps(mut self, init_steps: usize) -> Self {
         self.init_steps = init_steps;
         self
     }
 
-    pub(crate) fn seed(mut self, seed: u64) -> Self {
+    pub fn seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self
     }
 
-    pub(crate) async fn run(&self) -> Result<KMeansResult> {
+    pub async fn run(&self) -> Result<KMeansResult> {
         if self.ks.is_empty() {
             return plan_err!("k-means requires at least one K value");
         }

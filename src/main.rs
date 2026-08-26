@@ -2,6 +2,7 @@
 #[global_allocator]
 static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
 
+use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::memory_pool::FairSpillPool;
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
@@ -9,6 +10,9 @@ use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::object_store::path::Path as ObjectPath;
 use datafusion::prelude::*;
 use graphframes_rs::GraphFramesConfig;
+use graphframes_rs::{
+    DistanceMetric, EmbeddingMode, InitStrategy, KMeansBuilder, WeightsStrategy, kmeans_assign_expr,
+};
 use graphframes_rs::{EDGE_DST, EDGE_SRC, GraphFrame, VERTEX_ID};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,6 +24,30 @@ enum Format {
     Parquet,
     Csv,
     Json,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PicInit {
+    /// Degree vector d/Σd — the paper's recommended (and MLlib's "degree") init.
+    Degree,
+    /// Seeded pseudo-random v0, L1-normalized in expectation.
+    Random,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PicWeights {
+    /// Use the weight column (or unit weights) as-is.
+    None,
+    /// Positive pointwise mutual information: max(0, ln(w·W/(d_i·d_j))).
+    Ppmi,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PicEmbedding {
+    /// Paper mode (default): cluster on the final iterate only.
+    Last,
+    /// Extended mode: cluster on the full iterate history [v1..vm].
+    Trajectory,
 }
 
 #[derive(Args, Debug)]
@@ -191,6 +219,45 @@ enum Command {
         to_landmarks: bool,
     },
 
+    /// Power Iteration Clustering (Lin & Cohen 2010; Spark MLlib-inspired).
+    Pic {
+        #[command(flatten)]
+        common: CommonArgs,
+
+        /// Number of clusters; one cluster column per K (comma-separated).
+        #[arg(long, value_delimiter = ',', default_values_t = vec![2usize])]
+        k: Vec<usize>,
+
+        /// Maximum power iterations. PIC is *truncated* power iteration: the
+        /// cluster signal lives in early iterates, so on slow-mixing graphs a
+        /// lower budget gives a *better* embedding (paper average: 13).
+        #[arg(long, default_value_t = 20)]
+        max_iter: usize,
+
+        /// Convergence threshold on the (mass-normalized) acceleration.
+        /// Flat across graph sizes; smaller = more iterations.
+        #[arg(long, default_value_t = 1e-5)]
+        tol: f64,
+
+        /// Initial vector for the power iteration.
+        #[arg(long, value_enum, default_value_t = PicInit::Degree)]
+        init: PicInit,
+
+        /// Edge weight transform.
+        #[arg(long, value_enum, default_value_t = PicWeights::None)]
+        weights: PicWeights,
+
+        /// What the embedding column holds (paper clusters the final iterate).
+        #[arg(long, value_enum, default_value_t = PicEmbedding::Last)]
+        embedding: PicEmbedding,
+    },
+
+    /// Raw (graph-free) machine-learning algorithms.
+    Mllib {
+        #[command(subcommand)]
+        cmd: MllibCommand,
+    },
+
     /// Classical Label Propagation (CDLP).
     ClassicalLp {
         #[command(flatten)]
@@ -207,6 +274,82 @@ enum Command {
         /// pass `true` to skip symmetrization.
         #[arg(long, default_value_t = false)]
         undirected: bool,
+    },
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum KmeansArgsMetric {
+    L2,
+    Cosine,
+}
+
+#[derive(Subcommand, Debug)]
+enum MllibCommand {
+    /// K-Means (k-means|| init, Lloyd iterations) over a feature column.
+    ///
+    /// The vertices file must contain an Int64 `id` column and a
+    /// Float32 feature column of the shape `List<Float32>` or
+    /// `FixedSizeList<Float32>`; no edges are read.
+    Kmeans {
+        /// Path (or URI) to the features (vertices) file or directory.
+        #[arg(long)]
+        vertices: String,
+
+        /// Output directory as a `file://` URI.
+        #[arg(long)]
+        output: String,
+
+        /// Input file format for `--vertices`.
+        #[arg(long, value_enum, default_value_t = Format::Parquet)]
+        format: Format,
+
+        /// Name of the vertex-id column in the input; renamed to `id`.
+        #[arg(long, default_value = "id")]
+        id_col_name: String,
+
+        /// Name of the feature column: List<Float32> / FixedSizeList<Float32>.
+        #[arg(long)]
+        feature_col: String,
+
+        /// Number of clusters; one cluster column per K (comma-separated).
+        #[arg(long, value_delimiter = ',', default_values_t = vec![2usize])]
+        k: Vec<usize>,
+
+        /// Distance metric.
+        #[arg(long, value_enum, default_value_t = KmeansArgsMetric::L2)]
+        metric: KmeansArgsMetric,
+
+        /// Maximum Lloyd iterations.
+        #[arg(long, default_value_t = 20)]
+        max_iter: usize,
+
+        /// Convergence tolerance on the center shift.
+        #[arg(long, default_value_t = 1e-4)]
+        tol: f64,
+
+        /// k-means|| initialization steps.
+        #[arg(long, default_value_t = 2)]
+        init_steps: usize,
+
+        /// Seed for the (deterministic) sampling and Lloyd loop.
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+
+        /// DataFusion spill-pool memory limit, e.g. `4G` or `512M`.
+        #[arg(long, env = "GRAPHFRAMES_MAX_MEMORY", default_value = "4G")]
+        max_memory: String,
+
+        /// Parallelism (= DataFusion `target_partitions`).
+        #[arg(long, env = "GRAPHFRAMES_NUM_WORKERS", default_value_t = 2)]
+        num_workers: usize,
+
+        /// Base working directory for spill files.
+        #[arg(long, env = "GRAPHFRAMES_WORKDIR", default_value = "gf_workdir")]
+        checkpoint_dir: String,
+
+        /// Upper bound on the total size of DataFusion's temporary spill dir.
+        #[arg(long, env = "GRAPHFRAMES_MAX_TEMP_FILE", default_value = "200G")]
+        max_temp_file: String,
     },
 }
 
@@ -458,6 +601,126 @@ async fn main() -> Result<()> {
                 .run(&ctx, &common.output, false)
                 .await?;
         }
+        Command::Pic {
+            common,
+            k,
+            max_iter,
+            tol,
+            init,
+            weights,
+            embedding,
+        } => {
+            let (ctx, g, ckpt) = setup(&common).await?;
+            let mut b = g
+                .pic()
+                .set_multiple_k(k)
+                .set_max_iterations(max_iter)
+                .set_tol(tol)
+                .set_checkpoint_dir(ckpt);
+            if common.weighted {
+                b = b.set_edge_weight_col(&common.weight_col_name);
+            }
+            b = match init {
+                PicInit::Degree => b.set_init_strategy(InitStrategy::DegreeBased),
+                PicInit::Random => b.set_init_strategy(InitStrategy::Random),
+            };
+            b = match weights {
+                PicWeights::None => b.set_weights_strategy(WeightsStrategy::None),
+                PicWeights::Ppmi => b.set_weights_strategy(WeightsStrategy::PPMI),
+            };
+            b = match embedding {
+                PicEmbedding::Last => b.set_embedding_mode(EmbeddingMode::LastIterate),
+                PicEmbedding::Trajectory => b.set_embedding_mode(EmbeddingMode::FullTrajectory),
+            };
+            let res = b.run(&ctx, &common.output).await?;
+            log::info!(
+                "PIC embedding dim = {}, KMeans Lloyd iterations = {}",
+                res.d,
+                res.num_iterations
+            );
+        }
+        Command::Mllib { cmd } => match cmd {
+            MllibCommand::Kmeans {
+                vertices,
+                output,
+                format,
+                id_col_name,
+                feature_col,
+                k,
+                metric,
+                max_iter,
+                tol,
+                init_steps,
+                seed,
+                max_memory,
+                num_workers,
+                checkpoint_dir,
+                max_temp_file,
+            } => {
+                let work = ensure_dir(&checkpoint_dir)?;
+                let ctx = build_context(&work, &max_memory, num_workers, &max_temp_file)?;
+
+                let raw = read_data(&ctx, &vertices, format).await?;
+                let features =
+                    raw.select(vec![col(&id_col_name).alias(VERTEX_ID), col(&feature_col)])?;
+
+                let metric = match metric {
+                    KmeansArgsMetric::L2 => DistanceMetric::L2,
+                    KmeansArgsMetric::Cosine => DistanceMetric::Cosine,
+                };
+
+                // Deduplicate K values preserving order (KMeansBuilder does the
+                // same), so runs zip 1:1 with the requested list.
+                let mut ks: Vec<usize> = Vec::new();
+                for &kk in &k {
+                    if !ks.contains(&kk) {
+                        ks.push(kk);
+                    }
+                }
+
+                let res = KMeansBuilder::new(&features, &feature_col)
+                    .k_values(&ks)
+                    .metric(metric)
+                    .max_iter(max_iter)
+                    .tol(tol)
+                    .init_steps(init_steps)
+                    .seed(seed)
+                    .run()
+                    .await?;
+                log::info!(
+                    "k-means finished after {} Lloyd iterations, d = {}",
+                    res.num_iterations,
+                    res.d
+                );
+
+                // One cluster column per requested K (named by the requested
+                // K; computed with the effective centers, see KMeansRun.k).
+                let mut columns = vec![col(VERTEX_ID)];
+                for (kk, run) in ks.iter().zip(&res.runs) {
+                    log::info!(
+                        "k = {} (effective {}), total metric = {}",
+                        kk,
+                        run.k,
+                        run.total_metric
+                    );
+                    columns.push(
+                        kmeans_assign_expr(
+                            col(&feature_col),
+                            run.k,
+                            res.d,
+                            run.centers.clone(),
+                            metric,
+                        )
+                        .alias(format!("cluster_{kk}")),
+                    );
+                }
+                features
+                    .select(columns)?
+                    .write_parquet(&output, DataFrameWriteOptions::new(), None)
+                    .await?;
+                log::info!("result was written into {output}");
+            }
+        },
         Command::ClassicalLp {
             common,
             max_iter,

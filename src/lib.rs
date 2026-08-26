@@ -4,6 +4,11 @@ mod memory;
 mod ml;
 mod utils;
 
+pub use algorithm::community::power_iteration_clustering::{
+    EmbeddingMode, InitStrategy, PICBuilder, WeightsStrategy,
+};
+pub use expressions::kmeans_assign_expr;
+pub use ml::{DistanceMetric, KMeansBuilder, KMeansResult, KMeansRun};
 pub use utils::GraphFramesConfig;
 
 use datafusion::arrow::datatypes::DataType;

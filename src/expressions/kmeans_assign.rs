@@ -172,7 +172,7 @@ impl ScalarUDFImpl for KMeansCost {
 }
 
 /// Builds an [`Expr`] assigning each row to its nearest center.
-pub(crate) fn kmeans_assign_expr(
+pub fn kmeans_assign_expr(
     features: Expr,
     k: usize,
     d: usize,

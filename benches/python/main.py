@@ -57,6 +57,9 @@ ALGORITHMS = {
     "sp":       {"cli": "shortest-path", "args": [], "undirected": True},
     "cdlp":     {"cli": "classical-lp", "args": ["--max-iter", "10"], "undirected": False},
     "mis":      {"cli": "mis", "args": [], "undirected": False},
+    # PIC symmetrizes internally (the affinity matrix is symmetric by
+    # definition), so it needs no --symmetrize input handling.
+    "pic":      {"cli": "pic", "args": ["--k", "2", "--max-iter", "20"], "undirected": False},
 }
 
 
