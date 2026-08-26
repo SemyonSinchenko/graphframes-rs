@@ -15,6 +15,7 @@ gf_df_tmp*
 gf_checkpoints*
 gf_workdir*
 test-test*
+email-*
 .#*
 /graph500*
 /wiki-Talk*

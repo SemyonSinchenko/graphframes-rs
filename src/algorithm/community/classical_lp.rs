@@ -74,6 +74,7 @@ impl<'a> ClassicalLPBuilder<'a> {
                     .clone()
                     .select_columns(&[EDGE_SRC, EDGE_DST])?,
                 false,
+                None,
             )?
         };
 

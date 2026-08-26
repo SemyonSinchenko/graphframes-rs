@@ -87,6 +87,7 @@ impl<'a> KCoreBuilder<'a> {
                 .clone()
                 .select_columns(&[EDGE_SRC, EDGE_DST])?,
             true,
+            None,
         )?;
 
         // The undirected degree is the out-degree of the symmetrized graph.

@@ -45,7 +45,9 @@ Available algorithms:
 - `kcore`: K-Core decomposition;
 - `hyperanf`: Approximate Neighbor Function;
 - `shortest-path`: Multi-Source Shortest Path;
-- `classical-lp`: Classical (Raghavan) Label Propagaion
+- `classical-lp`: Classical (Raghavan) Label Propagaion;
+- `pic`: Power Iteration Clustering;
+- `mllib kmeans`: raw K-Means over a `List<Float32>` feature column of the vertices file (no edges read).
 
 Each has its own arguments — run `graphframes <algorithm> --help` for the full list. For what each algorithm computes, see [References](#references).
 
@@ -103,6 +105,7 @@ TBD
 ### Community Detection
 
 - **Classical Label Propagation**: _Raghavan, Usha Nandini, Réka Albert, and Soundar Kumara. "Near linear time algorithm to detect community structures in large-scale networks." Physical Review E—Statistical, Nonlinear, and Soft Matter Physics 76.3 (2007): 036106._
+- **Power Iteration Clustering**: _Lin, Frank, and William W. Cohen. "Power iteration clustering." (2010)._
 
 ### Subgraphs
 

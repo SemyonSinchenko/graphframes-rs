@@ -1,8 +1,14 @@
 mod algorithm;
 mod expressions;
 mod memory;
+mod ml;
 mod utils;
 
+pub use algorithm::community::power_iteration_clustering::{
+    EmbeddingMode, InitStrategy, PICBuilder, WeightsStrategy,
+};
+pub use expressions::kmeans_assign_expr;
+pub use ml::{DistanceMetric, KMeansBuilder, KMeansResult, KMeansRun};
 pub use utils::GraphFramesConfig;
 
 use datafusion::arrow::datatypes::DataType;
@@ -19,6 +25,8 @@ pub const EDGE_SRC: &str = "src";
 pub const EDGE_DST: &str = "dst";
 /// Column names for the edge column in triplet representation.
 pub const EDGE_COL: &str = "edge";
+/// Column names for edge weights
+pub const EDGE_WEIGHT: &str = "weight";
 /// Column names for the source vertex in triplet representation.
 pub const SRC_VERTEX: &str = "src_vertex";
 /// Column names for the destination vertex in triplet representation.
