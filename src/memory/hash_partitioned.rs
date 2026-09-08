@@ -6,6 +6,7 @@ use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::Statistics;
 use datafusion::common::config::ConfigOptions;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::listing::{
     ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl, PartitionedFile,
@@ -230,6 +231,13 @@ impl DataSource for HashPartitionedSource {
         self.inner
             .with_new_state(state)
             .map(|s| Self::wrap(s, self.partitioning.clone()))
+    }
+
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        self.inner.apply_expressions(f)
     }
 }
 
