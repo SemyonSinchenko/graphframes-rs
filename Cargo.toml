@@ -11,7 +11,7 @@ exclude = [
 [dependencies]
 
 # Core dependencies
-datafusion = "54.1.0"
+datafusion = "55.0.0"
 async-trait = "0.1"
 tokio = {version = "1", features = ["full"] }
 url = "2"
