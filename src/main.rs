@@ -11,7 +11,8 @@ use datafusion::object_store::path::Path as ObjectPath;
 use datafusion::prelude::*;
 use graphframes_rs::GraphFramesConfig;
 use graphframes_rs::{
-    DistanceMetric, EmbeddingMode, InitStrategy, KMeansBuilder, WeightsStrategy, kmeans_assign_expr,
+    DistanceMetric, EmbeddingMode, FastRPNormalization, InitStrategy, KMeansBuilder,
+    WeightsStrategy, kmeans_assign_expr,
 };
 use graphframes_rs::{EDGE_DST, EDGE_SRC, GraphFrame, VERTEX_ID};
 use std::path::{Path, PathBuf};
@@ -24,6 +25,16 @@ enum Format {
     Parquet,
     Csv,
     Json,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum FastrpNormalization {
+    /// Plain sum, no normalization.
+    None,
+    /// Linear normalization: divide by the source out-degree.
+    L1,
+    /// Square normalization: divide by the square root of the source out-degree.
+    L2,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -258,6 +269,91 @@ enum Command {
         cmd: MllibCommand,
     },
 
+    /// FastRP (Fast Random Projection) vertex embeddings.
+    Fastrp {
+        #[command(flatten)]
+        common: CommonArgs,
+
+        /// Embedding dimension D.
+        #[arg(long)]
+        dim: usize,
+
+        /// Number of propagation iterations K. The embedding is the last
+        /// iterate H_K; 0 returns the raw random projections.
+        #[arg(long, default_value_t = 4)]
+        iterations: usize,
+
+        /// Seed for the per-vertex sparse random projections.
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+
+        /// Per-iteration normalization of the propagated vectors:
+        /// `l1` divides each vector by the source out-degree (paper's S⁻¹),
+        /// `l2` by the square root of it (S^(-1/2)).
+        #[arg(long, value_enum, default_value_t = FastrpNormalization::None)]
+        normalization: FastrpNormalization,
+
+        /// L2-normalize the final embeddings to unit length.
+        #[arg(long)]
+        norm_output: bool,
+
+        /// Per-iterate weights of the final linear combination
+        /// H = Σ w_t·H_t over H_1..H_K (must have K entries; default: all
+        /// ones). The random init is never part of the combination; a zero
+        /// weight drops the iterate entirely.
+        #[arg(long, value_delimiter = ',')]
+        iteration_weights: Option<Vec<f64>>,
+    },
+
+    /// Graph clustering: FastRP embeddings (unit norm) + K-Means.
+    FastrpClustering {
+        #[command(flatten)]
+        common: CommonArgs,
+
+        /// Embedding dimension D.
+        #[arg(long)]
+        dim: usize,
+
+        /// FastRP propagation iterations K.
+        #[arg(long, default_value_t = 4)]
+        iterations: usize,
+
+        /// Seed for the random projections and the k-means|| init.
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+
+        /// Per-iteration normalization of the propagated vectors
+        /// (see fastrp).
+        #[arg(long, value_enum, default_value_t = FastrpNormalization::None)]
+        normalization: FastrpNormalization,
+
+        /// Per-iterate weights of the FastRP linear combination
+        /// H = Σ w_t·H_t over H_1..H_K (must have K entries; default: all
+        /// ones).
+        #[arg(long, value_delimiter = ',')]
+        iteration_weights: Option<Vec<f64>>,
+
+        /// Number of clusters; one center column per K (comma-separated).
+        #[arg(long, value_delimiter = ',', default_values_t = vec![2usize])]
+        k: Vec<usize>,
+
+        /// K-Means distance metric (embeddings are L2-normalized).
+        #[arg(long, value_enum, default_value_t = KmeansArgsMetric::L2)]
+        metric: KmeansArgsMetric,
+
+        /// Maximum Lloyd iterations.
+        #[arg(long, default_value_t = 20)]
+        max_iter: usize,
+
+        /// Convergence tolerance on the center shift.
+        #[arg(long, default_value_t = 1e-4)]
+        tol: f64,
+
+        /// k-means|| initialization steps.
+        #[arg(long, default_value_t = 2)]
+        init_steps: usize,
+    },
+
     /// Classical Label Propagation (CDLP).
     ClassicalLp {
         #[command(flatten)]
@@ -287,13 +383,13 @@ enum KmeansArgsMetric {
 enum MllibCommand {
     /// K-Means (k-means|| init, Lloyd iterations) over a feature column.
     ///
-    /// The vertices file must contain an Int64 `id` column and a
+    /// The features (vertices) file must contain an Int64 `id` column and a
     /// Float32 feature column of the shape `List<Float32>` or
-    /// `FixedSizeList<Float32>`; no edges are read.
+    /// `FixedSizeList<Float32>`.
     Kmeans {
         /// Path (or URI) to the features (vertices) file or directory.
         #[arg(long)]
-        vertices: String,
+        features: String,
 
         /// Output directory as a `file://` URI.
         #[arg(long)]
@@ -303,7 +399,7 @@ enum MllibCommand {
         #[arg(long, value_enum, default_value_t = Format::Parquet)]
         format: Format,
 
-        /// Name of the vertex-id column in the input; renamed to `id`.
+        /// Name of the vertex-id column in the input.
         #[arg(long, default_value = "id")]
         id_col_name: String,
 
@@ -641,7 +737,7 @@ async fn main() -> Result<()> {
         }
         Command::Mllib { cmd } => match cmd {
             MllibCommand::Kmeans {
-                vertices,
+                features,
                 output,
                 format,
                 id_col_name,
@@ -660,7 +756,7 @@ async fn main() -> Result<()> {
                 let work = ensure_dir(&checkpoint_dir)?;
                 let ctx = build_context(&work, &max_memory, num_workers, &max_temp_file)?;
 
-                let raw = read_data(&ctx, &vertices, format).await?;
+                let raw = read_data(&ctx, &features, format).await?;
                 let features =
                     raw.select(vec![col(&id_col_name).alias(VERTEX_ID), col(&feature_col)])?;
 
@@ -721,6 +817,84 @@ async fn main() -> Result<()> {
                 log::info!("result was written into {output}");
             }
         },
+        Command::Fastrp {
+            common,
+            dim,
+            iterations,
+            seed,
+            normalization,
+            norm_output,
+            iteration_weights,
+        } => {
+            let (ctx, g, ckpt) = setup(&common).await?;
+            let normalization = match normalization {
+                FastrpNormalization::None => FastRPNormalization::None,
+                FastrpNormalization::L1 => FastRPNormalization::L1,
+                FastrpNormalization::L2 => FastRPNormalization::L2,
+            };
+            let mut builder = g
+                .fastrp()
+                .dim(dim)
+                .iterations(iterations)
+                .seed(seed)
+                .normalization(normalization)
+                .norm_output(norm_output);
+            if let Some(w) = iteration_weights {
+                builder = builder.iteration_weights(w);
+            }
+            let iterations = builder
+                .set_checkpoint_dir(ckpt)
+                .run(&ctx, &common.output)
+                .await?;
+            log::info!("FastRP finished after {iterations} iterations");
+        }
+        Command::FastrpClustering {
+            common,
+            dim,
+            iterations,
+            seed,
+            normalization,
+            iteration_weights,
+            k,
+            metric,
+            max_iter,
+            tol,
+            init_steps,
+        } => {
+            let (ctx, g, ckpt) = setup(&common).await?;
+            let normalization = match normalization {
+                FastrpNormalization::None => FastRPNormalization::None,
+                FastrpNormalization::L1 => FastRPNormalization::L1,
+                FastrpNormalization::L2 => FastRPNormalization::L2,
+            };
+            let metric = match metric {
+                KmeansArgsMetric::L2 => DistanceMetric::L2,
+                KmeansArgsMetric::Cosine => DistanceMetric::Cosine,
+            };
+            let mut builder = g
+                .fastrp_clustering()
+                .set_dim(dim)
+                .set_iterations(iterations)
+                .set_seed(seed)
+                .set_normalization(normalization);
+            if let Some(w) = iteration_weights {
+                builder = builder.set_iteration_weights(w);
+            }
+            let res = builder
+                .set_multiple_k(k)
+                .set_metric(metric)
+                .set_max_iter(max_iter)
+                .set_tol(tol)
+                .set_kmeans_init_steps(init_steps)
+                .set_checkpoint_dir(ckpt)
+                .run(&ctx, &common.output)
+                .await?;
+            log::info!(
+                "FastRP clustering: d = {}, KMeans iterations = {}",
+                res.d,
+                res.num_iterations
+            );
+        }
         Command::ClassicalLp {
             common,
             max_iter,

@@ -1,3 +1,4 @@
+#![allow(dead_code, unused)] // one day I will remove this
 mod common;
 mod finite_axpb;
 mod hll;
@@ -14,5 +15,8 @@ pub(crate) use kcore_merge::kcore_merge_expr;
 pub use kmeans_assign::kmeans_assign_expr;
 pub(crate) use kmeans_assign::kmeans_cost_expr;
 pub(crate) use kmeans_step::kmeans_step_expr;
-pub(crate) use linalg::{cosine_distance_expr, l2_distance_expr, l2_norm_expr};
+pub(crate) use linalg::{
+    cosine_distance_expr, fastrp_init_expr, l2_distance_expr, l2_norm_expr, vec_scale_expr,
+    vec_sum_expr, vec_weighted_sum_expr, vec_zero_scalar,
+};
 pub(crate) use most_common::most_common_expr;

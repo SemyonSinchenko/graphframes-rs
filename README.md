@@ -47,6 +47,8 @@ Available algorithms:
 - `shortest-path`: Multi-Source Shortest Path;
 - `classical-lp`: Classical (Raghavan) Label Propagaion;
 - `pic`: Power Iteration Clustering;
+- `fastrp`: FastRP (Fast Random Projection) vertex embeddings (optional per-iteration L1/L2 degree normalization, optional weighted linear combination of the iterates `H = Σ w_t·H_t`, and optional L2 output normalization);
+- `fastrp-clustering`: graph clustering over FastRP embeddings (unit norm) + K-Means;
 - `mllib kmeans`: raw K-Means over a `List<Float32>` feature column of the vertices file (no edges read).
 
 Each has its own arguments — run `graphframes <algorithm> --help` for the full list. For what each algorithm computes, see [References](#references).
@@ -110,3 +112,7 @@ TBD
 ### Subgraphs
 
 - **Maximal Independent Set**: _Ghaffari, Mohsen. "An improved distributed algorithm for maximal independent set." Proceedings of the twenty-seventh annual ACM-SIAM symposium on Discrete algorithms. Society for Industrial and Applied Mathematics, 2016._
+
+### Embeddings
+
+- **FastRP**: _Chen, Haochen, et al. "Fast and accurate network embeddings via very sparse random projection." Proceedings of the 28th ACM international conference on information and knowledge management. 2019._

@@ -4,9 +4,11 @@ mod memory;
 mod ml;
 mod utils;
 
+pub use algorithm::community::fastrp_clustering::FastRPClusteringBuilder;
 pub use algorithm::community::power_iteration_clustering::{
     EmbeddingMode, InitStrategy, PICBuilder, WeightsStrategy,
 };
+pub use algorithm::embeddings::fastrp::{FastRPBuilder, FastRPNormalization};
 pub use expressions::kmeans_assign_expr;
 pub use ml::{DistanceMetric, KMeansBuilder, KMeansResult, KMeansRun};
 pub use utils::GraphFramesConfig;
