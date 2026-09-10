@@ -93,6 +93,22 @@ impl<'a> F32ListLike<'a> {
         }
     }
 
+    /// Length of a vector row. Only meaningful for a non-empty array: for a
+    /// `List` it reports row `0`'s length (rows may legally differ, which is
+    /// the mismatch the vector UDFs reject).
+    pub(crate) fn value_length(&self) -> usize {
+        match self {
+            F32ListLike::Fixed(a) => a.value_length() as usize,
+            F32ListLike::View(a) => {
+                if a.len() > 0 {
+                    a.value(0).len()
+                } else {
+                    0
+                }
+            }
+        }
+    }
+
     pub(crate) fn null_count(&self) -> usize {
         match self {
             F32ListLike::Fixed(a) => a.null_count(),
