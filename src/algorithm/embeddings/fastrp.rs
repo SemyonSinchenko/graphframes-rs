@@ -857,8 +857,10 @@ mod tests {
             }
             n
         }
-        let checkpoint_root: std::path::PathBuf =
-            checkpoint_dir.to_string().trim_start_matches("file://").into();
+        let checkpoint_root: std::path::PathBuf = checkpoint_dir
+            .to_string()
+            .trim_start_matches("file://")
+            .into();
         assert_eq!(
             count_files(&checkpoint_root),
             0,
