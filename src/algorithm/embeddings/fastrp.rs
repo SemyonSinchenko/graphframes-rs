@@ -419,7 +419,13 @@ impl<'a> FastRPBuilder<'a> {
             // remaining iterates fold in one at a time: acc = acc + w_t · H_t.
             // The full outer join grows the key set as iterates reach new
             // vertices (an absent iterate row is a zero contribution).
-            for (t, w) in kept.iter().skip(2) {
+            //
+            // Every step gets a *unique* checkpoint name: `push_pre_sorted`
+            // registers the directory in the eviction queue, and a repeated
+            // name would enqueue the same directory twice — the next
+            // `evict_all_but_latest_n` would then delete the directory the
+            // freshly returned (lazy) accumulator still scans.
+            for (step, (t, w)) in kept.iter().skip(2).enumerate() {
                 let side = states[*t].clone().select(vec![
                     col(VERTEX_ID).alias("__fastrp_ht_vid"),
                     col(EMBEDDING).alias("__fastrp_ht"),
@@ -440,7 +446,7 @@ impl<'a> FastRPBuilder<'a> {
                         .alias(ACC),
                     ])?;
                 acc = folds_checkpointer
-                    .push_pre_sorted(&ctx, "fold", acc.clone(), ACC_VID)
+                    .push_pre_sorted(&ctx, &format!("fold-{}", step + 1), acc.clone(), ACC_VID)
                     .await?;
                 // only the latest accumulator checkpoint is needed
                 folds_checkpointer.evict_all_but_latest_n(&ctx, 1).await?;
@@ -482,6 +488,7 @@ impl<'a> FastRPBuilder<'a> {
         edges_checkpointer.purge(&ctx).await?;
         states_checkpointer.purge(&ctx).await?;
         vertices_checkpointer.purge(&ctx).await?;
+        folds_checkpointer.purge(&ctx).await?;
 
         log::info!(
             "FastRP {run_id} finished after {} iterations, output: {output}",
@@ -799,6 +806,65 @@ mod tests {
         assert_eq!(
             got[&3],
             add_scaled(&add_scaled(&i2, 0.5, &i1, 1.0), 1.0, &i3, 2.0)
+        );
+        Ok(())
+    }
+
+    /// Regression test: the default `iterations(4)` + all-ones weights fold
+    /// K = 4 iterates, so the checkpointed fold loop runs twice. The loop used
+    /// to reuse the checkpoint name `fold` for every step; the second
+    /// `evict_all_but_latest_n` then deleted the directory the final join was
+    /// about to scan (`NotFound .../folds/fold/part-*.parquet`).
+    #[tokio::test]
+    async fn fastrp_four_iterations_leave_no_stale_fold_checkpoints() -> Result<()> {
+        let (ctx, checkpoint_dir, output_uri, _guard) = setup("fold4");
+        let d = 2;
+        let seed = 42u64;
+        // cycle 1 -> 2 -> 3 -> 1: H_t(v) = init(pred^t(v))
+        let g = create_graph(vec![1, 2, 3], vec![vec![1, 2], vec![2, 3], vec![3, 1]])?;
+
+        g.fastrp() // default iteration_weights = all ones
+            .dim(d)
+            .iterations(4)
+            .seed(seed)
+            .set_checkpoint_dir(checkpoint_dir.clone())
+            .run(&ctx, &output_uri)
+            .await?;
+
+        let got = embeddings_map(
+            ctx.read_parquet(&output_uri, ParquetReadOptions::default())
+                .await?,
+        )
+        .await?;
+        let i1 = init_ref(1, seed, d);
+        let i2 = init_ref(2, seed, d);
+        let i3 = init_ref(3, seed, d);
+
+        // H(1) = i3 + i2 + i1 + i3, H(2) = i1 + i3 + i2 + i1, H(3) = i2 + i1 + i3 + i2
+        assert_eq!(got[&1], add(&add(&add(&i3, &i2), &i1), &i3));
+        assert_eq!(got[&2], add(&add(&add(&i1, &i3), &i2), &i1));
+        assert_eq!(got[&3], add(&add(&add(&i2, &i1), &i3), &i2));
+
+        // the run must not leak checkpoint files (empty dirs may remain)
+        fn count_files(dir: &std::path::Path) -> usize {
+            let mut n = 0;
+            for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    n += count_files(&entry.path());
+                } else {
+                    n += 1;
+                }
+            }
+            n
+        }
+        let checkpoint_root: std::path::PathBuf = checkpoint_dir
+            .to_string()
+            .trim_start_matches("file://")
+            .into();
+        assert_eq!(
+            count_files(&checkpoint_root),
+            0,
+            "checkpoint files must be purged after a successful run"
         );
         Ok(())
     }

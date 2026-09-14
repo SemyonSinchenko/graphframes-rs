@@ -780,7 +780,6 @@ mod tests {
     use datafusion::arrow::datatypes::{Field, Schema};
     use datafusion::datasource::MemTable;
     use std::sync::Arc;
-    use std::time::Instant;
 
     fn lcg(seed: &mut u32) -> f32 {
         *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
