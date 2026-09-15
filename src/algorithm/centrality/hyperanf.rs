@@ -43,7 +43,7 @@ impl<'a> HyperANFBuilder<'a> {
             graph: graph,
             directed: true,
             n_hops: 2,
-            lg_k: 12,
+            lg_k: 8,
             checkpoint_config: CheckpointConfig::default_local_fs(),
         }
     }
@@ -126,7 +126,7 @@ impl<'a> HyperANFBuilder<'a> {
             .add_message(pregel_src(BALL), MessageDirection::SrcToDst)
             // Collapse the per-edge messages into one sketch per destination
             // vertex before the update.
-            .add_aggregate_expr(hll_long_aggregate(pregel_default_msg()))
+            .add_aggregate_expr(hll_long_aggregate(pregel_default_msg(), self.lg_k))
             .with_participation_column(
                 "changed",
                 lit(true),
@@ -257,7 +257,7 @@ mod tests {
         Ok(map)
     }
 
-    /// HLL is near-exact at these small cardinalities (lg_k=12), so a 0.5
+    /// HLL is near-exact at these small cardinalities (lg_k=8), so a 0.5
     /// absolute tolerance both rounds to the true integer count and catches any
     /// participation/aggregation bug that drops a neighbour (a shift of >= 1).
     fn assert_size(map: &HashMap<i64, f64>, id: i64, expected: i64) {
