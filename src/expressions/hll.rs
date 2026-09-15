@@ -17,9 +17,11 @@
 //!
 //! Sketches are carried as `Binary` columns, but the UDFs accept `BinaryView`
 //! as well, because parquet spills — the foundation of the out-of-core Pregel
-//! engine — round-trip `Binary` as `BinaryView`. Note that `hll_long_aggregate`
-//! is pinned to `lg_k = 12` (`DEFAULT_LG_K`); keep it paired with sketches
-//! built at the same `lg_k`, or it will silently downsample.
+//! engine — round-trip `Binary` as `BinaryView`. Every `hll_*` constructor
+//! takes an explicit `lg_k`; keep `hll_long_aggregate` paired with sketches
+//! built at the same `lg_k`, or the merged sketch silently adopts a different
+//! precision — and a different memory footprint (an Hll8 array-mode image is
+//! 2^lg_k bytes, so mismatched `lg_k` directly changes the algorithm's budget).
 //!
 //! These are the building blocks for HyperANF / HyperBALL and approximate
 //! closeness centrality (see `algorithm::centrality::hyperanf`).
@@ -43,7 +45,6 @@ use crate::expressions::common::as_binary_like;
 use crate::expressions::common::downcast_int64;
 
 const DEFAULT_HLL_TYPE: HllType = HllType::Hll8;
-const DEFAULT_LG_K: u8 = 12;
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub(crate) struct HllLong {
@@ -420,8 +421,13 @@ impl AggregateUDFImpl for HllAggregate {
     }
 }
 
-pub(crate) fn hll_long_aggregate(col: Expr) -> Expr {
-    AggregateUDF::from(HllAggregate::new(DEFAULT_LG_K)).call(vec![col])
+/// Aggregate a column of serialized sketches into one sketch per group.
+///
+/// `lg_k` must match the `lg_k` the input sketches were built with, so the
+/// merged sketch keeps the caller's chosen precision (and register-array
+/// footprint) instead of silently growing to a hard-coded default.
+pub(crate) fn hll_long_aggregate(col: Expr, lg_k: u8) -> Expr {
+    AggregateUDF::from(HllAggregate::new(lg_k)).call(vec![col])
 }
 
 #[cfg(test)]
@@ -1048,7 +1054,7 @@ mod tests {
         let out = df
             .aggregate(
                 vec![col("g")],
-                vec![hll_long_aggregate(hll_long(col("id"), 12)).alias("s")],
+                vec![hll_long_aggregate(hll_long(col("id"), 12), 12).alias("s")],
             )?
             .select(vec![hll_long_estimate(col("s")).alias("est")])?
             .collect()
@@ -1076,7 +1082,7 @@ mod tests {
         let out = df
             .aggregate(
                 vec![col("g")],
-                vec![hll_long_aggregate(hll_long(col("id"), 12)).alias("s")],
+                vec![hll_long_aggregate(hll_long(col("id"), 12), 12).alias("s")],
             )?
             .select(vec![col("g"), hll_long_estimate(col("s")).alias("est")])?
             .sort(vec![col("g").sort(true, true)])?
@@ -1143,7 +1149,7 @@ mod tests {
             .unwrap()
             .aggregate(
                 vec![col("g")],
-                vec![hll_long_aggregate(col("s")).alias("m")],
+                vec![hll_long_aggregate(col("s"), 12).alias("m")],
             )
             .unwrap()
             .select(vec![hll_long_estimate(col("m")).alias("est")])
@@ -1204,7 +1210,7 @@ mod tests {
             .unwrap()
             .aggregate(
                 vec![col("g")],
-                vec![hll_long_aggregate(hll_long(col("id"), 12)).alias("s")],
+                vec![hll_long_aggregate(hll_long(col("id"), 12), 12).alias("s")],
             )
             .unwrap()
             .select(vec![hll_long_estimate(col("s")).alias("est")])
