@@ -26,6 +26,10 @@ pub struct PageRankBuilder<'a> {
     reset_prob: f64,
     tol: f64,
 
+    /// Optional source vertex ids for personalized (GraphX-style) PageRank.
+    /// `None` (or an empty vec) selects the uniform seeding.
+    sources: Option<Vec<i64>>,
+
     /// Storage options
     checkpoint_config: CheckpointConfig,
 }
@@ -37,6 +41,7 @@ impl<'a> PageRankBuilder<'a> {
             max_iter: 0,
             reset_prob: 0.15,
             tol: 0.01,
+            sources: None,
             checkpoint_config: CheckpointConfig::default_local_fs(),
         }
     }
@@ -53,6 +58,22 @@ impl<'a> PageRankBuilder<'a> {
 
     pub fn tol(mut self, tol: f64) -> Self {
         self.tol = tol;
+        self
+    }
+
+    /// Set the source vertices for personalized (GraphX-style) PageRank.
+    ///
+    /// When set and non-empty, only these vertices are seeded: their initial
+    /// rank and delta are `1.0`, every other vertex starts at `0.0`, and only
+    /// the sources are active in the first iteration (see the seeding logic in
+    /// [`PageRankBuilder::run`]). When unset (or empty), the uniform seeding
+    /// with `reset_prob` is used.
+    ///
+    /// Only `i64` ids are accepted: vertex ids in a `GraphFrame` must be
+    /// `Int64` (enforced by `GraphFrame::try_new`), so the type is validated
+    /// at compile time.
+    pub fn sources(mut self, sources: Vec<i64>) -> Self {
+        self.sources = Some(sources);
         self
     }
 
@@ -123,18 +144,35 @@ impl<'a> PageRankBuilder<'a> {
         // stationary distribution, which is wrong whenever the graph has sinks.
         let new_delta = lit(alpha) * coalesce(vec![pregel_default_msg(), lit(0.0)]);
 
+        // Seeding. The uniform case seeds both the rank and the delta with the reset
+        // probability, which reproduces the bootstrap of the GraphX dynamic PageRank
+        // (its initial message is resetProb / damping). The personalized case seeds
+        // the rank and the delta of the source vertices with 1.0, like the GraphX
+        // personalized vertex program; only the source vertices are active initially.
+        let (init_rank, init_delta, init_active) = match self.sources.as_deref() {
+            Some(sources) if !sources.is_empty() => {
+                let is_source = in_list(
+                    col(VERTEX_ID),
+                    sources.iter().map(|&id| lit(id)).collect::<Vec<_>>(),
+                    false,
+                );
+                (
+                    when(is_source.clone(), lit(1.0)).otherwise(lit(0.0))?,
+                    when(is_source.clone(), lit(1.0)).otherwise(lit(0.0))?,
+                    is_source,
+                )
+            }
+            _ => (
+                lit(reset_prob_per_vertices),
+                lit(reset_prob_per_vertices),
+                lit(true),
+            ),
+        };
+
         let pregel_builder = graph_with_degrees
             .pregel()
-            .add_vertex_column(
-                PAGERANK,
-                lit(reset_prob_per_vertices),
-                col(PAGERANK) + new_delta.clone(),
-            )
-            .add_vertex_column(
-                PAGERANK_DELTA,
-                lit(reset_prob_per_vertices),
-                new_delta.clone(),
-            )
+            .add_vertex_column(PAGERANK, init_rank, col(PAGERANK) + new_delta.clone())
+            .add_vertex_column(PAGERANK_DELTA, init_delta, new_delta.clone())
             .add_vertex_column("out_degree", col("out_degree"), col("out_degree"))
             .add_message(
                 pregel_src(PAGERANK_DELTA) / pregel_src("out_degree"),
@@ -146,7 +184,7 @@ impl<'a> PageRankBuilder<'a> {
             // message generation every iteration, while voting only decides when to stop.
             .with_participation_column(
                 "participates",
-                lit(true),
+                init_active,
                 new_delta.clone().gt(lit(self.tol)),
             )
             .skip_dest_state()
@@ -481,6 +519,116 @@ mod tests {
             "every vertex (incl. the sink) must match the reference PageRank"
         );
 
+        Ok(())
+    }
+
+    /// Joins the calculated ranks with expected `(vertex_id, pagerank)` pairs
+    /// (LEFT join from the expected side, so a vertex missing from the output
+    /// yields a NULL rank) and asserts every rank is within `tol`.
+    async fn assert_ranks_close(
+        calculated: DataFrame,
+        expected: Vec<(i64, f64)>,
+        tol: f64,
+    ) -> Result<()> {
+        let expected_df = dataframe!(
+            "vertex_id" => expected.iter().map(|(id, _)| *id).collect::<Vec<i64>>(),
+            "expected_pr" => expected.iter().map(|(_, rank)| *rank).collect::<Vec<f64>>(),
+        )?;
+        let mismatches = expected_df
+            .join(
+                calculated,
+                JoinType::Left,
+                &["vertex_id"],
+                &[VERTEX_ID],
+                None,
+            )?
+            .with_column("difference", abs(col("expected_pr") - col(PAGERANK)))?
+            .filter(col("difference").gt(lit(tol)).or(col(PAGERANK).is_null()))?;
+        assert_eq!(
+            mismatches.count().await?,
+            0,
+            "every vertex rank must match the expected value within {tol}"
+        );
+        Ok(())
+    }
+
+    /// Personalized PageRank with GraphX-style seeding on a graph whose every
+    /// iteration can be verified with a calculator.
+    ///
+    /// Graph (a 2-cycle fed by vertex 1): `1 -> 2 -> 3 -> 2`
+    ///
+    /// With `sources = [1]`, `reset_prob = 0.15` (damping alpha = 0.85) and
+    /// `max_iter = 4`, only vertex 1 is seeded and active initially:
+    ///   init: PR = (1, 0, 0), delta = (1, 0, 0)
+    ///   it 1: v2 += 0.85 * 1        -> PR = (1, 0.85, 0)
+    ///   it 2: v3 += 0.85 * 0.85     -> PR = (1, 0.85, 0.7225)
+    ///   it 3: v2 += 0.85 * 0.7225   -> PR = (1, 1.464125, 0.7225)
+    ///   it 4: v3 += 0.85 * 0.614125 -> PR = (1, 1.464125, 1.24450625)
+    /// The raw sum is 3.70863125, so the normalized result is
+    /// v1 = 0.269641259157, v2 = 0.394788508564, v3 = 0.335570232279.
+    #[tokio::test]
+    async fn test_pagerank_personalized_single_source() -> Result<()> {
+        let graph = create_graph(vec![1, 2, 3], vec![(1, 2), (2, 3), (3, 2)])?;
+        let (ctx, checkpoint_dir, output_uri, _guard) = setup("pagerank_personalized_single")?;
+        graph
+            .pagerank()
+            .max_iter(4)
+            .reset_prob(0.15)
+            .sources(vec![1])
+            .set_checkpoint_dir(checkpoint_dir)
+            .run(&ctx, &output_uri, false)
+            .await?;
+
+        let calculated_page_rank = ctx
+            .read_parquet(&output_uri, ParquetReadOptions::default())
+            .await?;
+        assert_ranks_close(
+            calculated_page_rank,
+            vec![
+                (1, 0.269641259157),
+                (2, 0.394788508564),
+                (3, 0.335570232279),
+            ],
+            1e-9,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Personalized PageRank with multiple sources on the same 2-cycle graph.
+    ///
+    /// `sources = [2, 3]` seeds vertices 2 and 3 with rank/delta 1.0, while
+    /// vertex 1 starts at 0.0, never receives a message (no incoming edges)
+    /// and must end at exactly 0 after normalization. Vertices 2 and 3 stay
+    /// symmetric — each feeds the other with its full delta every iteration:
+    ///   init: PR = (0, 1, 1), delta = (0, 1, 1)
+    ///   it 1: PR = (0, 1.85, 1.85)
+    ///   it 2: PR = (0, 2.5725, 2.5725)
+    ///   it 3: PR = (0, 3.186625, 3.186625)
+    ///   it 4: PR = (0, 3.70863125, 3.70863125)
+    /// so both normalize to exactly 0.5.
+    #[tokio::test]
+    async fn test_pagerank_personalized_multi_source() -> Result<()> {
+        let graph = create_graph(vec![1, 2, 3], vec![(1, 2), (2, 3), (3, 2)])?;
+        let (ctx, checkpoint_dir, output_uri, _guard) = setup("pagerank_personalized_multi")?;
+        graph
+            .pagerank()
+            .max_iter(4)
+            .reset_prob(0.15)
+            .sources(vec![2, 3])
+            .set_checkpoint_dir(checkpoint_dir)
+            .run(&ctx, &output_uri, false)
+            .await?;
+
+        let calculated_page_rank = ctx
+            .read_parquet(&output_uri, ParquetReadOptions::default())
+            .await?;
+        assert_ranks_close(
+            calculated_page_rank,
+            vec![(1, 0.0), (2, 0.5), (3, 0.5)],
+            1e-9,
+        )
+        .await?;
         Ok(())
     }
 }
