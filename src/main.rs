@@ -170,6 +170,14 @@ enum Command {
 
         #[arg(long, default_value_t = 0)]
         max_iter: usize,
+
+        /// Personalized PageRank (GraphX-style): comma-separated source vertex
+        /// ids seeded with rank/delta 1.0, e.g. --personalized 1,4. Other
+        /// vertices start from 0.0 and only the sources are active initially.
+        /// Requires Int64 id columns: string ids are remapped to synthetic ids,
+        /// so personalized source ids cannot be resolved.
+        #[arg(long, value_delimiter = ',')]
+        personalized: Option<Vec<i64>>,
     },
 
     /// Weakly connected components via randomized contraction.
@@ -553,6 +561,36 @@ async fn read_data(ctx: &SessionContext, path: &str, format: Format) -> Result<D
     Ok(r)
 }
 
+/// Fast-fail when personalized PageRank is requested for string-keyed input.
+///
+/// String id columns are remapped to synthetic Int64 ids by `from_string_ids`
+/// (the originals are kept in the `origin_id` column), and no reverse mapping
+/// is performed, so `--personalized` source ids could never refer to a vertex
+/// of the remapped graph. ID mapping and personalized PageRank are not
+/// supported together right now.
+async fn ensure_personalized_ids_supported(common: &CommonArgs) -> Result<()> {
+    let ctx = SessionContext::new();
+    let vertices = read_data(&ctx, &common.vertices, common.format.clone()).await?;
+    let vid_type = vertices
+        .schema()
+        .field_with_unqualified_name(&common.id_col_name)?
+        .data_type()
+        .clone();
+    if matches!(
+        vid_type,
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+    ) {
+        return Err(DataFusionError::NotImplemented(
+            "personalized PageRank cannot be combined with string vertex ids: string ids \
+             are remapped to synthetic Int64 ids and no reverse mapping is performed, so \
+             the requested --personalized source ids would not refer to any vertex. \
+             Provide Int64 id columns or run without --personalized."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Renames the listed columns to their canonical names, keeping every other
 /// column (and its order) unchanged.
 fn rename_to_canonical(df: DataFrame, pairs: &[(&str, &str)]) -> Result<DataFrame> {
@@ -705,13 +743,23 @@ async fn main() -> Result<()> {
             tol,
             reset_prob,
             max_iter,
+            personalized,
         } => {
+            // Fast-fail before any setup work: string ids are remapped to
+            // synthetic Int64 ids, so personalized source ids cannot be resolved.
+            if personalized.is_some() {
+                ensure_personalized_ids_supported(&common).await?;
+            }
             let (ctx, g, ckpt) = setup(&common).await?;
-            let _ = g
+            let mut builder = g
                 .pagerank()
                 .reset_prob(reset_prob)
                 .tol(tol)
-                .max_iter(max_iter)
+                .max_iter(max_iter);
+            if let Some(sources) = personalized {
+                builder = builder.sources(sources);
+            }
+            let _ = builder
                 .set_checkpoint_dir(ckpt)
                 .run(&ctx, &common.output, false)
                 .await?;
