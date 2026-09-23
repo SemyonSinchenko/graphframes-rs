@@ -2,6 +2,7 @@
 #[global_allocator]
 static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
 
+use datafusion::arrow::datatypes::DataType;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::memory_pool::FairSpillPool;
@@ -14,7 +15,7 @@ use graphframes_rs::{
     DistanceMetric, EmbeddingMode, FastRPNormalization, InitStrategy, KMeansBuilder,
     WeightsStrategy, kmeans_assign_expr,
 };
-use graphframes_rs::{EDGE_DST, EDGE_SRC, GraphFrame, VERTEX_ID};
+use graphframes_rs::{EDGE_DST, EDGE_SRC, GraphFrame, VERTEX_ID, from_string_ids};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -65,15 +66,18 @@ enum PicEmbedding {
 struct CommonArgs {
     /// Path (or URI) to the vertices file or directory.
     ///
-    /// Must contain an Int64 vertex-id column (`id` by default; override with
-    /// `--id-col-name`). Extra attribute columns are allowed but ignored.
+    /// Vertex-id column (`id` by default; override with `--id-col-name`).
+    /// Int64, or a string column that is remapped to synthetic Int64 ids
+    /// (the originals are kept in an `origin_id` column). Extra attribute
+    /// columns are allowed but ignored on the Int64 path.
     #[arg(long)]
     vertices: String,
 
     /// Path (or URI) to the edges file or directory.
     ///
-    /// Must contain Int64 source/destination columns (`src`/`dst` by default;
-    /// override with `--src-col-name` / `--dst-col-name`).
+    /// Source/destination columns (`src`/`dst` by default; override with
+    /// `--src-col-name` / `--dst-col-name`). Int64, or string columns that are
+    /// remapped to synthetic Int64 ids.
     #[arg(long)]
     edges: String,
 
@@ -549,6 +553,24 @@ async fn read_data(ctx: &SessionContext, path: &str, format: Format) -> Result<D
     Ok(r)
 }
 
+/// Renames the listed columns to their canonical names, keeping every other
+/// column (and its order) unchanged.
+fn rename_to_canonical(df: DataFrame, pairs: &[(&str, &str)]) -> Result<DataFrame> {
+    let cols: Vec<Expr> = df
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| {
+            let name = f.name();
+            match pairs.iter().find(|(from, _)| from == name) {
+                Some((_, to)) => col(name).alias(*to),
+                None => col(name),
+            }
+        })
+        .collect();
+    df.select(cols)
+}
+
 async fn build_graph(
     ctx: &SessionContext,
     vertices: &str,
@@ -560,20 +582,77 @@ async fn build_graph(
     weighted: bool,
     weight_col_name: &str,
     symmetrize: bool,
+    workdir: &Path,
 ) -> Result<GraphFrame> {
     let r_vertices = read_data(ctx, vertices, format.clone()).await?;
     let r_edges = read_data(ctx, edges, format.clone()).await?;
 
-    let vertices = r_vertices.select(vec![col(id_col).alias(VERTEX_ID)])?;
+    let is_string = |dt: &DataType| {
+        matches!(
+            dt,
+            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+        )
+    };
+    let vid_type = r_vertices
+        .schema()
+        .field_with_unqualified_name(id_col)?
+        .data_type()
+        .clone();
+    let src_type = r_edges
+        .schema()
+        .field_with_unqualified_name(src_col)?
+        .data_type()
+        .clone();
+    let dst_type = r_edges
+        .schema()
+        .field_with_unqualified_name(dst_col)?
+        .data_type()
+        .clone();
 
-    let mut edge_cols = vec![col(src_col).alias(EDGE_SRC), col(dst_col).alias(EDGE_DST)];
-    if weighted {
-        // Keep the weight column under its original name: no canonical name is
-        // defined yet, and no algorithm consumes it. Column selection fails
-        // with a clear DataFusion error if the input has no such column.
-        edge_cols.push(col(weight_col_name));
-    }
-    let edges = r_edges.select(edge_cols)?;
+    let (vertices, edges) = if is_string(&vid_type) || is_string(&src_type) || is_string(&dst_type)
+    {
+        if !(is_string(&vid_type) && is_string(&src_type) && is_string(&dst_type)) {
+            return Err(DataFusionError::Plan(format!(
+                "mixed id column types: id={vid_type}, src={src_type}, dst={dst_type}; \
+                     string and integer keys cannot be combined"
+            )));
+        }
+        // Normalize the key columns to the library's canonical names and
+        // keep every attribute column; the ingest preserves them.
+        let v_canonical = rename_to_canonical(r_vertices, &[(id_col, VERTEX_ID)])?;
+        let e_canonical =
+            rename_to_canonical(r_edges, &[(src_col, EDGE_SRC), (dst_col, EDGE_DST)])?;
+
+        let ingest_out = workdir.join("ingest").to_string_lossy().to_string();
+        let res = from_string_ids(ctx, v_canonical, e_canonical, &ingest_out, None).await?;
+        log::info!(
+            "string ids remapped: {} vertices, {} edges -> {ingest_out}",
+            res.num_vertices,
+            res.num_edges
+        );
+        let vertices = ctx
+            .read_parquet(
+                &format!("{ingest_out}/vertices/"),
+                ParquetReadOptions::new(),
+            )
+            .await?;
+        let edges = ctx
+            .read_parquet(&format!("{ingest_out}/edges/"), ParquetReadOptions::new())
+            .await?;
+        (vertices, edges)
+    } else {
+        let vertices = r_vertices.select(vec![col(id_col).alias(VERTEX_ID)])?;
+
+        let mut edge_cols = vec![col(src_col).alias(EDGE_SRC), col(dst_col).alias(EDGE_DST)];
+        if weighted {
+            // Keep the weight column under its original name: no canonical name is
+            // defined yet, and no algorithm consumes it. Column selection fails
+            // with a clear DataFusion error if the input has no such column.
+            edge_cols.push(col(weight_col_name));
+        }
+        let edges = r_edges.select(edge_cols)?;
+        (vertices, edges)
+    };
 
     let g = GraphFrame::try_new(vertices, edges)?;
     if symmetrize { g.symmetrize() } else { Ok(g) }
@@ -601,6 +680,7 @@ async fn setup(common: &CommonArgs) -> Result<(SessionContext, GraphFrame, Objec
         common.weighted,
         &common.weight_col_name,
         common.symmetrize,
+        &work.fs,
     )
     .await?;
 

@@ -1,8 +1,11 @@
 mod algorithm;
 mod expressions;
+mod ingest;
 mod memory;
 mod ml;
 mod utils;
+
+pub use ingest::{IngestResult, from_string_ids};
 
 pub use algorithm::community::fastrp_clustering::FastRPClusteringBuilder;
 pub use algorithm::community::power_iteration_clustering::{

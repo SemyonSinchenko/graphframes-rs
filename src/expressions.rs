@@ -9,6 +9,7 @@ mod linalg;
 mod most_common;
 
 pub(crate) use common::as_f32_list_like;
+pub(crate) use common::downcast_int64;
 pub(crate) use finite_axpb::{axpb, finite_axpb};
 pub(crate) use hll::{hll_long, hll_long_aggregate, hll_long_estimate, hll_long_union};
 pub(crate) use kcore_merge::kcore_merge_expr;
