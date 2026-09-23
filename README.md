@@ -28,6 +28,8 @@ graphframes page-rank \
 
 Vertices must contain an Int64 `id` column; edges must contain Int64 `src` and `dst` columns. If your input uses different names, map them with `--id-col-name`, `--src-col-name`, and `--dst-col-name`. The input format defaults to parquet; `--format csv` and `--format json` are also available.
 
+String keys are also accepted: if `id`/`src`/`dst` are string columns, the CLI remaps them to synthetic Int64 ids (Spark's `monotonically_increasing_id`-style partition stamping via `from_string_ids`) and keeps the original values in an `origin_id` column of the vertices output.
+
 Two input-adjacent flags exist: `--symmetrize` adds the reverse of every edge
 after loading (for algorithms defined on undirected graphs whose input stores
 each edge only once, e.g. LDBC undirected datasets — note that PageRank is
