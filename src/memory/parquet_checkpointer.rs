@@ -130,6 +130,28 @@ impl ParquetCheckpointer {
         table.read_dataframe(ctx).await
     }
 
+    /// Union of every checkpoint this checkpointer is still tracking, in write
+    /// order; `None` when nothing was ever written (e.g. every frame was empty).
+    ///
+    /// Each tracked directory is read back individually -- listing a parent
+    /// directory does not recurse into subdirectories in DataFusion -- and the
+    /// frames are unioned, which requires identical schemas.
+    pub(crate) async fn read_all(&self, ctx: &SessionContext) -> Result<Option<DataFrame>> {
+        let mut frames = Vec::with_capacity(self.stored.len());
+        for dir in &self.stored {
+            let uri = format!("{}{}/", self.store_url.as_str(), dir);
+            frames.push(ctx.read_parquet(uri, ParquetReadOptions::default()).await?);
+        }
+        let mut frames = frames.into_iter();
+        let Some(mut acc) = frames.next() else {
+            return Ok(None);
+        };
+        for df in frames {
+            acc = acc.union(df)?;
+        }
+        Ok(Some(acc))
+    }
+
     pub(crate) async fn evict(&mut self, ctx: &SessionContext, n: usize) -> Result<()> {
         let store = ctx.runtime_env().object_store(&self.store_url)?;
         let to_remove = n.min(self.stored.len());

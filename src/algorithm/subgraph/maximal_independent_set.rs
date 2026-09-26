@@ -7,6 +7,35 @@
 //! Mohsen Ghaffari
 //!
 //! https://arxiv.org/abs/1506.05093
+//!
+//! # Round structure (fused, shuffle-minimal)
+//!
+//! One Ghaffari round is:
+//!
+//! 1. **gather** — one shuffle-free sort-merge pass over the frozen edges
+//!    scatters `(p, nom)` of every active vertex to its neighbours, and a
+//!    single aggregation computes both `d(v) = sum p(u)` and
+//!    `has_nbr_nom(v) = bool_or(nom(u))` in one shuffle. The paper defines
+//!    both over the same round-`t` values, so they share one message pass.
+//! 2. **vertex program** — the aggregated messages are left-joined back onto
+//!    the state. A vertex that received no messages has `d = NULL` (no active
+//!    neighbour) and joins the MIS regardless of its draw; this replaces the
+//!    classic "isolated vertices" anti-join *and* the final "no edges left"
+//!    sweep, which both existed only to drain such vertices. The `p` update
+//!    and the election flag are local projections.
+//! 3. **removal** — `removed = elected ∪ N(elected)`. `N(elected)` is a
+//!    src-keyed join over the frozen edges (mirror symmetry), and the set is
+//!    deliberately *not* deduplicated: it only feeds an anti-join, which is
+//!    insensitive to duplicate right-hand rows.
+//! 4. **checkpoint** — the surviving state is written hash-partitioned and
+//!    sorted by vertex id, drawing next round's `nom` at write time, so every
+//!    join above sees co-partitioned, sorted inputs and skips both the
+//!    shuffle and the sort.
+//!
+//! Elected vertices are appended to a per-round parquet log. A vertex can be
+//! elected at most once (it leaves the active set in the same round), so the
+//! log needs neither deduplication nor a join against a full-history flag
+//! frame; the final result is the log projected to [`VERTEX_ID`].
 
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::error::Result;
@@ -33,42 +62,22 @@ use crate::{
 const MIS_V: &str = "__mis_v";
 /// Current selection probability `p` of an active vertex.
 const MIS_PROB: &str = "__mis_prob";
-/// Effective degree `d(v) = sum of p over v's neighbours`.
+/// Effective degree `d(v) = sum of p over v's *active* neighbours`.
 const MIS_DEG: &str = "__mis_deg";
 /// Per-vertex "nominated this round" flag (drawn against the current `p`).
 const MIS_NOM: &str = "__mis_nom";
-/// Per-vertex "at least one neighbour nominated" flag.
+/// Per-vertex "at least one neighbour nominated" flag. `NULL` on the state
+/// side of the left join (no active neighbour), coalesced to `false` below.
 const MIS_HAS_NBR_NOM: &str = "__mis_has_nbr_nom";
 
 // Throw-away renamed keys used only to disambiguate the two sides of a join.
+/// Key of the aggregated-message frame entering the left join with the state.
 const MIS_NEW_V: &str = "__mis_new_v";
-const MIS_NEW_FLAG: &str = "__mis_new_flag";
+/// Key of the `removed` frame entering the anti-join with the candidates.
 const MIS_REM_V: &str = "__mis_rem_v";
-
-/// Final boolean flag column carried by the per-vertex MIS state frame:
-/// `true` once a vertex has been added to the independent set.
-pub const MIS_FLAG: &str = "mis";
-
-/// Folds a set of newly-selected vertex ids (`members`, schema `[MIS_V]`)
-/// into the per-vertex MIS state, setting [`MIS_FLAG`] to `true` for every
-/// id present in `members`.
-///
-/// `members`' id is renamed to [`MIS_NEW_V`] before a left join so the result
-/// schema carries no duplicate `__mis_v` field, and the joined flag is
-/// coalesced to `false` so a non-matching left row cannot turn `flag.or(...)`
-/// into SQL `NULL`.
-fn or_into_mis(current_mis: DataFrame, members: DataFrame) -> Result<DataFrame> {
-    let members = members
-        .with_column_renamed(MIS_V, MIS_NEW_V)?
-        .with_column(MIS_NEW_FLAG, lit(true))?;
-    current_mis
-        .join(members, JoinType::Left, &[MIS_V], &[MIS_NEW_V], None)?
-        .with_column(
-            MIS_FLAG,
-            col(MIS_FLAG).or(coalesce(vec![col(MIS_NEW_FLAG), lit(false)])),
-        )?
-        .select(vec![col(MIS_V), col(MIS_FLAG)])
-}
+/// Per-vertex "joins the MIS this round": nominated with no nominated
+/// neighbour, or no active neighbour at all (`d = NULL`).
+const MIS_ELECTED: &str = "__mis_elected";
 
 #[derive(Debug, Clone)]
 pub struct MISBuilder<'a> {
@@ -126,52 +135,48 @@ impl<'a> MISBuilder<'a> {
         let ckpt_base = self.checkpoint_config.dir.clone().join(run_id.clone());
         let store_url = self.checkpoint_config.store_url.clone();
 
-        // a) edges checkpointer b) vertices left checkpointer c) current MIS checkpointer
+        // a) frozen edge table b) per-vertex state c) per-round candidates
+        // d) append-only elected log (never evicted within a run)
         let mut edges_ckptr =
             ParquetCheckpointer::new(store_url.clone(), ckpt_base.clone().join("edges"));
-        let mut vertex_ckptr =
-            ParquetCheckpointer::new(store_url.clone(), ckpt_base.clone().join("vertices"));
-        let mut mis_checkpointer =
-            ParquetCheckpointer::new(store_url.clone(), ckpt_base.clone().join("mis"));
+        let mut state_ckptr =
+            ParquetCheckpointer::new(store_url.clone(), ckpt_base.clone().join("state"));
+        let mut cand_ckptr =
+            ParquetCheckpointer::new(store_url.clone(), ckpt_base.clone().join("cand"));
+        let mut elected_ckptr =
+            ParquetCheckpointer::new(store_url.clone(), ckpt_base.clone().join("elected"));
 
-        // current_mis: every vertex with a boolean `mis` flag (false initially).
-        let mut current_mis = mis_checkpointer
-            .push(
+        // state_0: every vertex starts active with p = 1/2 (Ghaffari). `nom` is
+        // drawn when the state is *written*, so the whole round reads one
+        // stable draw per vertex -- `random()` is evaluated per row and per
+        // execution, it must never live inside a lazily re-read frame.
+        let mut state = state_ckptr
+            .push_pre_sorted(
                 ctx,
-                "0",
-                self.graph.vertices.clone().select(vec![
-                    col(VERTEX_ID).alias(MIS_V),
-                    lit(false).alias(MIS_FLAG),
-                ])?,
-            )
-            .await?;
-
-        // vertices_left: vertices still "active", each carrying its current
-        // selection probability p (Ghaffari starts every vertex at 1/2).
-        let mut vertices_left = vertex_ckptr
-            .push(
-                ctx,
-                "0",
+                "state-0",
                 self.graph.vertices.clone().select(vec![
                     col(VERTEX_ID).alias(MIS_V),
                     lit(0.5f64).alias(MIS_PROB),
+                    random().lt_eq(lit(0.5f64)).alias(MIS_NOM),
                 ])?,
+                MIS_V,
             )
             .await?;
 
-        // Symmetrize + dedup edges so the graph is treated as undirected and
-        // simple. Dedup is required here: a duplicated edge would inflate the
-        // effective-degree computation.
+        // The symmetrized + deduplicated edge set is the only edge data the
+        // algorithm ever touches, and it is written exactly once:
+        // hash-partitioned and sorted by EDGE_SRC. Dedup is required here: a
+        // duplicated edge would inflate the effective-degree sum.
         //
         // Project to just (src, dst) first: the algorithm never reads edge
         // attributes, and `symmetrize`'s reversed half is a 2-column projection
         // so feeding it anything but [src, dst] is both wasted checkpoint bytes
-        // and a hard union-schema error ("UNION queries have different number of
-        // columns"). The only edge columns worth carrying are the endpoints.
-        let mut edges = edges_ckptr
-            .push(
+        // and a hard union-schema error ("UNION queries have different number
+        // of columns"). The only edge columns worth carrying are the endpoints.
+        let edges = edges_ckptr
+            .push_pre_sorted(
                 ctx,
-                "initial",
+                "edges",
                 symmetrize(
                     &self
                         .graph
@@ -181,220 +186,158 @@ impl<'a> MISBuilder<'a> {
                     true,
                     None,
                 )?,
+                EDGE_SRC,
             )
             .await?;
 
         let mut iteration = 0usize;
-        let mut converged = false;
-
-        while !converged {
-            // ---- effective degree: d(v) = sum of p_t over v's neighbours ----
+        loop {
+            // ---- gather: one shuffle-free pass over the frozen edges ----
             //
-            // see arXiv preprint for details.
-            let effective_degrees = edges_ckptr
-                .push(
-                    ctx,
-                    &format!("deg_{}", iteration),
-                    edges
-                        .clone()
-                        .join(
-                            vertices_left.clone(),
-                            JoinType::Inner,
-                            &[EDGE_DST],
-                            &[MIS_V],
-                            None,
-                        )?
-                        .aggregate(
-                            vec![col(EDGE_SRC)],
-                            vec![functions_aggregate::sum::sum(col(MIS_PROB)).alias(MIS_DEG)],
-                        )?,
-                )
-                .await?;
-
-            // ---- nominate (using p_t) and update p -> p_{t+1} ----
-            // Per the paper, nomination must use the current p_t; only afterwards
-            // is p advanced to p_{t+1}, which is what the next round reads.
-            //
-            // see arXiv preprint for details
-            let probs = vertex_ckptr
-                .push(
-                    ctx,
-                    &format!("probs_{}", iteration),
-                    vertices_left
-                        .clone()
-                        .join(
-                            effective_degrees.clone(),
-                            JoinType::Inner,
-                            &[MIS_V],
-                            &[EDGE_SRC],
-                            None,
-                        )?
-                        .with_column(MIS_NOM, random().lt_eq(col(MIS_PROB)))?
-                        .with_column(
-                            MIS_PROB,
-                            when(col(MIS_DEG).gt_eq(lit(2.0)), col(MIS_PROB).div(lit(2.0)))
-                                .when(
-                                    lit(2.0).mul(col(MIS_PROB)).lt_eq(lit(0.5)),
-                                    lit(2.0).mul(col(MIS_PROB)),
-                                )
-                                .otherwise(lit(0.5))?,
-                        )?
-                        .select(vec![col(MIS_V), col(MIS_PROB), col(MIS_NOM)])?,
-                )
-                .await?;
-
-            // ---- isolated vertices: active vertices with no edges (degree 0) ----
-            // Such a vertex never appears as an edge source, so it is absent from
-            // `effective_degrees`;
-            let isolated = vertices_left
+            // Scatter (p, nom) of every *active* source to its neighbours, then
+            // compute both round reductions in a single shuffle:
+            //   d(v)       = sum of p over active neighbours
+            //   has_nom(v) = OR of nom over active neighbours
+            // The inner join against the active state IS the edge contraction:
+            // a removed vertex is absent from the state, hence sends nothing.
+            let gathered = state
                 .clone()
-                .join(
-                    effective_degrees,
-                    JoinType::LeftAnti,
-                    &[MIS_V],
-                    &[EDGE_SRC],
-                    None,
-                )?
-                .select(vec![col(MIS_V)])?;
-
-            // ---- for each vertex, does any neighbour nominate itself? ----
-            let has_nom_nbr = edges
-                .clone()
-                .join(probs.clone(), JoinType::Inner, &[EDGE_DST], &[MIS_V], None)?
+                .join(edges.clone(), JoinType::Inner, &[MIS_V], &[EDGE_SRC], None)?
+                .select(vec![
+                    col(EDGE_DST).alias(MIS_NEW_V),
+                    col(MIS_PROB),
+                    col(MIS_NOM),
+                ])?
                 .aggregate(
-                    vec![col(EDGE_SRC)],
-                    vec![bool_or(col(MIS_NOM)).alias(MIS_HAS_NBR_NOM)],
+                    vec![col(MIS_NEW_V)],
+                    vec![
+                        functions_aggregate::sum::sum(col(MIS_PROB)).alias(MIS_DEG),
+                        bool_or(col(MIS_NOM)).alias(MIS_HAS_NBR_NOM),
+                    ],
                 )?;
 
-            // ---- a nominated vertex with no nominated neighbour joins the MIS ----
-            let joined_mis = probs
-                .clone()
-                .join(has_nom_nbr, JoinType::Inner, &[MIS_V], &[EDGE_SRC], None)?
-                .filter(not(col(MIS_HAS_NBR_NOM)).and(col(MIS_NOM)))?
-                .select(vec![col(MIS_V)])?;
+            // ---- vertex program: left join back + local projections ----
+            //
+            // The LEFT join subsumes the old `isolated` anti-join: a vertex
+            // with no messages has d = NULL, i.e. no active neighbour, and
+            // joins the MIS regardless of its draw. Per the paper, nomination
+            // uses the current p_t; only afterwards is p advanced to p_{t+1},
+            // which is what the next round reads.
+            let candidates_df =
+                state
+                    .clone()
+                    .join(gathered, JoinType::Left, &[MIS_V], &[MIS_NEW_V], None)?
+                    .with_column(
+                        MIS_ELECTED,
+                        col(MIS_DEG)
+                            .is_null()
+                            .or(col(MIS_NOM)
+                                .and(not(coalesce(vec![col(MIS_HAS_NBR_NOM), lit(false)])))),
+                    )?
+                    .with_column(
+                        MIS_PROB,
+                        when(col(MIS_DEG).gt_eq(lit(2.0)), col(MIS_PROB).div(lit(2.0)))
+                            .when(
+                                lit(2.0).mul(col(MIS_PROB)).lt_eq(lit(0.5)),
+                                lit(2.0).mul(col(MIS_PROB)),
+                            )
+                            .otherwise(lit(0.5))?,
+                    )?
+                    .select(vec![col(MIS_V), col(MIS_PROB), col(MIS_ELECTED)])?;
 
-            // ---- neighbours of freshly-joined MIS vertices (to be removed) ----
-            // The symmetrized edge set makes a single direction sufficient: every
-            // neighbour u of a joined vertex v is the source of edge (u, v).
-            let neighbors_of_mis = edges
-                .clone()
-                .join(
-                    joined_mis.clone(),
-                    JoinType::Inner,
-                    &[EDGE_DST],
-                    &[MIS_V],
-                    None,
-                )?
-                .select(vec![col(EDGE_SRC).alias(MIS_V)])?;
-
-            // ---- vertices to drop from the active graph: joined MIS + their neighbours ----
-            let removed = neighbors_of_mis
-                .clone()
-                .union(joined_mis.clone())?
-                .distinct()?;
-
-            // ---- update the MIS flag: isolated vertices + freshly joined vertices ----
-            let new_mis_members = isolated.clone().union(joined_mis.clone())?.distinct()?;
-
-            current_mis = mis_checkpointer
-                .push(
-                    ctx,
-                    &format!("mis_{}", iteration),
-                    or_into_mis(current_mis.clone(), new_mis_members)?,
-                )
+            // Materialize the round exactly once; everything below is a cheap
+            // filter over this frame. DataFusion plans are trees, not DAGs:
+            // without this checkpoint every consumer of the candidate frame
+            // would re-run the whole gather above.
+            let candidates = cand_ckptr
+                .push(ctx, &format!("cand_{iteration}"), candidates_df)
                 .await?;
 
-            // ---- new active vertex set: probs minus removed ----
-            let removed_r = removed.clone().with_column_renamed(MIS_V, MIS_REM_V)?;
-            vertices_left = vertex_ckptr
+            // ---- elected log: append-only, no flag frame ----
+            //
+            // A vertex can be elected at most once (it leaves the active set in
+            // the same round), so the log needs neither deduplication nor a
+            // per-iteration left join against a full-history frame. A round
+            // that elects nobody simply writes no files.
+            let joined = elected_ckptr
                 .push(
                     ctx,
-                    &format!("vertices-{}", iteration),
-                    probs
+                    &format!("joined_{iteration}"),
+                    candidates
                         .clone()
-                        .join(
-                            removed_r.clone(),
-                            JoinType::LeftAnti,
-                            &[MIS_V],
-                            &[MIS_REM_V],
-                            None,
-                        )?
-                        .select(vec![col(MIS_V), col(MIS_PROB)])?,
+                        .filter(col(MIS_ELECTED))?
+                        .select(vec![col(MIS_V)])?,
                 )
                 .await?;
 
-            // ---- contract edges: drop any edge touching a removed vertex ----
-            edges = edges_ckptr
-                .push(
-                    ctx,
-                    &format!("contracted_{}", iteration),
-                    edges
-                        .clone()
-                        .join(
-                            removed_r.clone(),
-                            JoinType::LeftAnti,
-                            &[EDGE_SRC],
-                            &[MIS_REM_V],
-                            None,
-                        )?
-                        .join(
-                            removed_r,
-                            JoinType::LeftAnti,
-                            &[EDGE_DST],
-                            &[MIS_REM_V],
-                            None,
-                        )?,
-                )
+            // ---- removal: elected ∪ N(elected), *not* deduplicated ----
+            //
+            // The set only feeds an anti-join, which ignores duplicate
+            // right-hand rows, so the old union-distinct shuffle is gone.
+            //
+            // N(elected) via a src-keyed join: the edge table is symmetric, so
+            // {u : (u, x) ∈ E, x elected} == {dst : (x, dst) ∈ E, x elected},
+            // and the src-keyed variant is co-partitioned with the frozen edge
+            // table (no edge-side shuffle).
+            let neighbors_of_elected = edges
+                .clone()
+                .join(joined.clone(), JoinType::Inner, &[EDGE_SRC], &[MIS_V], None)?
+                .select(vec![col(EDGE_DST).alias(MIS_V)])?;
+            let removed = neighbors_of_elected.union(joined)?;
+            let removed_r = removed.with_column_renamed(MIS_V, MIS_REM_V)?;
+
+            // ---- next state: survivors, drawing next round's nomination ----
+            let next_state = candidates
+                .clone()
+                .filter(not(col(MIS_ELECTED)))?
+                .join(removed_r, JoinType::LeftAnti, &[MIS_V], &[MIS_REM_V], None)?
+                .select(vec![
+                    col(MIS_V),
+                    col(MIS_PROB),
+                    random().lt_eq(col(MIS_PROB)).alias(MIS_NOM),
+                ])?;
+
+            state = state_ckptr
+                .push_pre_sorted(ctx, &format!("state-{}", iteration + 1), next_state, MIS_V)
                 .await?;
 
-            // Count BEFORE evicting: when an iteration empties a frame, the
-            // checkpointer returns the in-memory plan (no parquet files were
-            // written) and that plan still references the about-to-be-deleted
-            // checkpoints. Materialising the counts first keeps those reads valid.
-            let cnt_v_left = vertices_left.clone().count().await?;
-            let cnt_e_left = edges.clone().count().await?;
-            log::info!(
-                "iteration {iteration} done, {cnt_v_left} vertices, {cnt_e_left} edges left in the graph"
-            );
+            // The active vertex set is the only thing that can shrink (edges
+            // are frozen, elections are appended to the log). Convergence means
+            // no active vertex is left; a surviving set that became pairwise
+            // non-adjacent drains in the next round through the d = NULL
+            // election rule, so no separate "no edges left" sweep is needed.
+            let cnt_left = state.clone().count().await?;
+            log::info!("iteration {iteration} done, {cnt_left} vertices left in the active graph");
 
-            if cnt_e_left == 0 {
-                // No edges remain among the active vertices, so the survivors are
-                // pairwise non-adjacent: the whole remaining set is independent
-                // and can join the MIS at once. Sweeping them here (rather than
-                // looping once more) also avoids re-entering the loop with an
-                // empty edge set whose in-memory frame references already-
-                // evicted checkpoints.
-                if cnt_v_left > 0 {
-                    let remaining = vertices_left.clone().select(vec![col(MIS_V)])?;
-                    current_mis = mis_checkpointer
-                        .push(
-                            ctx,
-                            &format!("mis_sweep_{}", iteration),
-                            or_into_mis(current_mis.clone(), remaining)?,
-                        )
-                        .await?;
-                }
-                converged = true;
-            }
-
-            vertex_ckptr.evict_all_but_latest_n(ctx, 1).await?;
-            edges_ckptr.evict_all_but_latest_n(ctx, 1).await?;
-            mis_checkpointer.evict_all_but_latest_n(ctx, 1).await?;
+            // Count BEFORE evicting: the count reads the freshly written state
+            // checkpoint; after it materializes, older generations are dead.
+            state_ckptr.evict_all_but_latest_n(ctx, 1).await?;
+            cand_ckptr.evict_all_but_latest_n(ctx, 1).await?;
+            // `edges` and the elected log are never evicted.
 
             iteration += 1;
+            if cnt_left == 0 {
+                break;
+            }
         }
 
         log::info!("MIS converged after {iteration} iterations.");
 
-        current_mis
-            .filter(col(MIS_FLAG))?
-            .select(vec![col(MIS_V).alias(VERTEX_ID)])?
-            .write_parquet(output, DataFrameWriteOptions::new(), None)
-            .await?;
+        // The result is the elected log projected to the vertex-id column.
+        // Rounds that elected nobody wrote no files (and are not tracked), so
+        // `read_all` yields `None` for an empty MIS; rounds write
+        // pairwise-disjoint id sets, so no dedup pass is needed.
+        if let Some(elected) = elected_ckptr.read_all(ctx).await? {
+            elected
+                .select(vec![col(MIS_V).alias(VERTEX_ID)])?
+                .write_parquet(output, DataFrameWriteOptions::new(), None)
+                .await?;
+        }
 
-        vertex_ckptr.purge(ctx).await?;
+        state_ckptr.purge(ctx).await?;
+        cand_ckptr.purge(ctx).await?;
+        elected_ckptr.purge(ctx).await?;
         edges_ckptr.purge(ctx).await?;
-        mis_checkpointer.purge(ctx).await?;
 
         Ok(iteration)
     }
