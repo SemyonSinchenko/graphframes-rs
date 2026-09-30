@@ -1,11 +1,28 @@
 # Setup
 
-- [`c5d.4xlarge`](https://instances.vantage.sh/aws/ec2/c5d.4xlarge?currency=USD)
+## Instance
+
+[`c5d.4xlarge`](https://instances.vantage.sh/aws/ec2/c5d.4xlarge?currency=USD)
+
+| Key                   | Value                     |
+| --------------------- | ------------------------- |
+| vCPUs                 | 16                        |
+| Memory (GiB)          | 32                        |
+| Memory per vCPU (GiB) | 2                         |
+| Physical Processor    | Intel Xeon Platinum 8124M |
+| Clock Speed (GHz)     | 3.4 GHz                   |
+| CPU Architecture      | x86_64                    |
+| NVME Drive            | true                      |
+| Disk Space (GiB)      | 400                       |
+
+## Run arguments
+
+Entry point: `benches/python/main.py`
+
 - `--max-memory 30G`
 - `--num-workers 16`
-- NVM 400G
 
-## Results
+# Results
 
 Wall time, peak RSS and peak disk are medians over 5 runs (see `<algorithm>/<size>/<graph>/benchmark.json`).
 
