@@ -25,6 +25,8 @@ Feel free to open an issue if you have an idea of what can be chnaged and how th
 
 Python bindings with `pyo3` / `maturin` are planned but out-of-scope right now.
 
+Right now the project is able to run *some* graph algorithms on billion-scale graphs on a sinlge node. See current benchmark results [here](benches/results/README.md).
+
 ## Usage
 
 ### CLI
