@@ -2,6 +2,29 @@
 
 An experimental single node out-of core graph algorithms.
 
+## About
+
+The project aims to re-implement the GraphX computation model ([_Gonzalez, J. E., Xin, R. S., Dave, A., Crankshaw, D., Franklin, M. J., & Stoica, I. (2014). {GraphX}: Graph processing in a distributed dataflow framework. In 11th USENIX symposium on operating systems design and implementation (OSDI 14) (pp. 599-613)._](https://www.usenix.org/system/files/conference/osdi14/osdi14-paper-gonzalez.pdf)) inside the [Apache DataFusion](https://datafusion.apache.org/).
+
+The main idea behind this tool is the question why one should move the data outside the query engine, convert it to Compressed Sparse Rows and then transform it back just to run one of graph algorithms as part of the broader data processing pipeline. And the answer is simple: one doesn't need to do so.
+
+Graph is threated as two relations:
+
+- `edges`
+- `vertices`
+
+and algorithms are implemented as relational operations like `SELECT`, `JOIN`, `GROUP BY` and `AGGREGATE` over this two relations.
+
+The "driver" is stateless and does not handle any data bigger a few constants. All the algorithms are written in the way when the peak memory consumption does not depend of the data size but depend only on DataFusion's batch-size and an amount of parallel workers.
+
+## State of the project
+
+Right now there is a CLI that can be used but I cannot guarantee that there won't be any breaking changes in the future. No releases or published artifacts for now. While the libraray public surface is stabilizing, I cannot guarantee as well there won't be any breaking changes.
+
+Feel free to open an issue if you have an idea of what can be chnaged and how the public API should look like.
+
+Python bindings with `pyo3` / `maturin` are planned but out-of-scope right now.
+
 ## Usage
 
 ### CLI
