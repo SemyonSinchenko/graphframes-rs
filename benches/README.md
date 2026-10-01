@@ -72,15 +72,15 @@ For every (algorithm, dataset) the runner:
 
 The runner hardcodes LDBC-inspired parameters (no properties/manifest files):
 
-| algorithm | CLI subcommand | parameters |
-|---|---|---|
-| pagerank | `page-rank`   | `--max-iter 10` (damping 0.85) |
-| wcc      | `wcc`         | `--seed 42` |
-| kcore    | `kcore`       | `--max-iter 10` |
-| hyperanf | `hyperanf`    | `--n-hops 5` |
-| sp       | `shortest-path` | landmark = 25th percentile vertex id (0.25 * vertices) |
-| cdlp     | `classical-lp` | `--max-iter 10` (LDBC bidirectional-edge semantic) |
-| mis      | `mis`         | — |
+| algorithm | CLI subcommand  | parameters                                             |
+| --------- | --------------- | ------------------------------------------------------ |
+| pagerank  | `page-rank`     | `--max-iter 10` (damping 0.85)                         |
+| wcc       | `wcc`           | `--seed 42`                                            |
+| kcore     | `kcore`         | `--max-iter 10`                                        |
+| hyperanf  | `hyperanf`      | `--n-hops 5`                                           |
+| sp        | `shortest-path` | landmark = 25th percentile vertex id (0.25 * vertices) |
+| cdlp      | `classical-lp`  | `--max-iter 10` (LDBC bidirectional-edge semantic)     |
+| mis       | `mis`           | —                                                      |
 
 `--undirected` is honoured per algorithm: PageRank is defined only on directed
 graphs (ignored), WCC/KCore/MIS and ClassicalLP symmetrize internally
@@ -88,10 +88,10 @@ graphs (ignored), WCC/KCore/MIS and ClassicalLP symmetrize internally
 
 ## Monitoring notes
 
-* RSS sampling reads `/proc/<pid>/status` (`VmRSS` per poll, `VmHWM` for the
+- RSS sampling reads `/proc/<pid>/status` (`VmRSS` per poll, `VmHWM` for the
   peak) — Linux only by design; the JSON simply records no RSS series on other
   platforms.
-* Disk sampling defaults to `--disk-mode du`: the size of the workdir tree
+- Disk sampling defaults to `--disk-mode du`: the size of the workdir tree
   itself (checkpoints, spills, output), measured with a pure-python `os.walk`
   — exact and cheap (the workdir only holds a handful of parquet files), so it
   samples at the same rate as everything else. This is what makes the disk
@@ -102,7 +102,7 @@ graphs (ignored), WCC/KCore/MIS and ClassicalLP symmetrize internally
   free-space accounting (e.g. btrfs) and can read ~0 while the tree holds
   hundreds of MB. Deltas are floored at 0 (disk consumption is never
   negative), and the RSS/disk plots cap the mean and CI band at 0 as well.
-* Point `--checkpoint-dir` at fast local storage (NVMe/SSD); with
+- Point `--checkpoint-dir` at fast local storage (NVMe/SSD); with
   `--disk-mode du` (the default) the measurement is the workdir tree itself,
   so a dedicated mount is no longer required for clean disk numbers.
 
